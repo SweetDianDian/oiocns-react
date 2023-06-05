@@ -12,26 +12,21 @@ const getColItem = (
     attrId: string;
     valueEnum: Object | undefined;
   } & XProperty,
-  colKey: 'propertyId' | 'attrId' = 'propertyId',
 ) => {
   // 使用属性Id 展示表格
   const { id, attrId, name, valueType = '描述型', valueEnum = undefined } = col;
-  const width = name.length * 40 > 100 ? name.length * 40 : 100;
 
   let ColItem: ProColumns<any> = {
     title: name,
     key: id,
-    dataIndex: (colKey === 'attrId' ? attrId : id) ?? id,
-    width: width,
+    dataIndex: attrId ?? id,
     valueType: ColTypes.get(valueType) as 'text',
     valueEnum: valueEnum as ProSchemaValueEnumObj,
     render(text: any, _record: any) {
-      const _key = colKey === 'attrId' ? attrId : id;
-
-      if (_key && _record?.EDIT_INFO?.[_key]) {
+      if (_record?.EDIT_INFO?.[attrId]) {
         return (
           <span style={{ color: '#154ad8' }} title={`修改前：${text}`}>
-            {_record?.EDIT_INFO?.[_key]}
+            {_record?.EDIT_INFO?.[attrId]}
           </span>
         );
       }
@@ -43,9 +38,8 @@ const getColItem = (
     case '用户型':
       {
         ColItem.render = (text: ReactNode, _record: any) => {
-          if (text) {
-            let share = orgCtrl.user?.findShareById(text as string);
-
+          if (_record) {
+            let share = orgCtrl.user?.findShareById(_record[attrId ?? id]);
             return (
               <>
                 <TeamIcon share={share} size={15} />
@@ -65,7 +59,7 @@ const getColItem = (
   }
   return ColItem;
 };
-
+/* 生成属性id转对象 特性id 映射 Map */
 const MakePropertysToAttrMap = (propertys: any[]) => {
   const PtyToAttrId: Map<string, string> = new Map([]);
   propertys.forEach((proper) => {
@@ -86,4 +80,25 @@ const submitCurrentTableData = debounce(
   },
   100,
 );
-export { getColItem, MakePropertysToAttrMap, submitCurrentTableData };
+/* 属性对象转 特性对象 */
+const handlePropToAttrObj = (Ptyrows: any[], hasIds: string[], propertys: any[]) => {
+  const keyMap: Map<string, string> = MakePropertysToAttrMap(propertys);
+  // 判断是否 已选择存在
+  return Ptyrows.filter((s: { Id: string }) => !hasIds.includes(s.Id)).map(
+    (item: any) => {
+      let obj: { [key: string]: any } = {};
+      const { Propertys = {}, ...rest } = item;
+      Object.keys(Propertys).forEach((key) => {
+        const _key = key.slice(1);
+        keyMap.has(_key) && (obj[keyMap.get(_key)!] = item.Propertys[key]);
+      });
+      return { ...rest, ...obj };
+    },
+  );
+};
+export {
+  getColItem,
+  handlePropToAttrObj,
+  MakePropertysToAttrMap,
+  submitCurrentTableData,
+};
