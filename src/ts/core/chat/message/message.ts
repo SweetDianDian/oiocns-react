@@ -70,7 +70,7 @@ export interface IMessage {
   /** 已读人员 */
   readedIds: string[];
   /** 未读人员信息 */
-  unreadInfo: model.ShareIcon[];
+  unreadInfo: IMessageLabel[];
   /** 评论数 */
   comments: number;
   /** 消息撤回 */
@@ -152,11 +152,21 @@ export class Message implements IMessage {
     const ids = this.labels.map((v) => v.userId);
     return ids.filter((id, i) => ids.indexOf(id) === i);
   }
-  get unreadInfo(): model.ShareIcon[] {
+  get unreadInfo(): IMessageLabel[] {
     const ids = this.readedIds;
     return this._chat.members
       .filter((m) => !ids.includes(m.id) && m.id != this.user.id)
-      .map((m) => this.user.findShareById(m.id));
+      .map(
+        (m) =>
+          new MessageLabel(
+            {
+              label: m.remark,
+              userId: m.id,
+              time: '',
+            },
+            this.user,
+          ),
+      );
   }
   get comments(): number {
     return this.labels.filter((v) => v.label != '已读').length;
@@ -173,16 +183,13 @@ export class Message implements IMessage {
   }
   get msgTitle(): string {
     let header = ``;
-    if (
-      this._chat.metadata.typeName != TargetType.Person &&
-      this.metadata.fromId != this.user.id
-    ) {
-      header += `${this.from.name}`;
+    if (this._chat.metadata.typeName != TargetType.Person) {
+      header += `${this.from.name}: `;
     }
     switch (this.msgType) {
       case MessageType.Text:
       case MessageType.Recall:
-        return `${header}[消息]:${this.msgBody.substring(0, 50)}`;
+        return `${header}${this.msgBody.substring(0, 50)}`;
       case MessageType.Voice:
         return `${header}[${MessageType.Voice}]`;
     }

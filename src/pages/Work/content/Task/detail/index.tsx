@@ -1,5 +1,4 @@
 import Design from '@/pages/Setting/content/Standard/Flow/Design';
-import Thing from '@/pages/Store/content/Thing/Thing';
 import orgCtrl from '@/ts/controller';
 import { CheckOutlined, CloseOutlined } from '@ant-design/icons';
 import { ProFormInstance } from '@ant-design/pro-form';
@@ -7,9 +6,11 @@ import { Button, Card, Collapse, Input, Tabs, TabsProps, Timeline } from 'antd';
 import React, { useRef, useState } from 'react';
 import { ImUndo2 } from 'react-icons/im';
 import cls from './index.module.less';
-import OioForm from '@/bizcomponents/FormDesign/OioForm';
+import OioForm from '@/bizcomponents/FormDesign/OioFormNext';
 import { schema } from '@/ts/base';
 import { IWorkDefine } from '@/ts/core';
+import BashThing from '@/pages/Work/content/Work/ThingTables/BaseThing';
+import EntityIcon from '@/bizcomponents/GlobalComps/entityIcon';
 
 export interface TaskDetailType {
   task: schema.XWorkTask;
@@ -24,31 +25,46 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
   const [loading, setLoading] = useState<boolean>(false);
 
   /** 加载主表 */
-  const loadHeadForms = (forms: any) => {
-    const content: React.JSX.Element[] = [];
+  const loadForms = (forms: any) => {
+    const content: React.ReactNode[] = [];
+    let items: any[] = [];
     Object.keys(forms?.formData || {}).forEach((id) => {
       if (forms.formData[id].isHeader) {
         content.push(
-          ...loadForm(
+          ...loadFormItem(
             [JSON.parse(forms.formData[id].resourceData)],
             true,
             forms.headerData,
           ),
         );
+      } else {
+        let json = JSON.parse(forms?.formData[id].resourceData);
+        items.push({
+          label: json.form.name,
+          key: json.form.id,
+          children: (
+            <BashThing
+              readonly
+              propertys={json.propertys}
+              dataSource={json.data}
+              form={json.form}
+            />
+          ),
+        });
       }
     });
-    return content;
+    return [content, <Tabs tabPosition="top" key={2} items={items} />];
   };
 
   /** 加载表单 */
-  const loadForm = (forms: schema.XForm[], disabled: boolean, data?: any) => {
+  const loadFormItem = (forms: schema.XForm[], disabled: boolean, data?: any) => {
     let content = [];
     for (let item of forms) {
       content.push(
         <OioForm
           key={item.id}
           form={item}
-          define={define}
+          belong={define.workItem.current.space}
           formRef={undefined}
           fieldsValue={data}
           disabled={disabled}
@@ -73,10 +89,10 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
                 </div>
                 <div style={{ paddingRight: '24px' }}>
                   发起人：
-                  {orgCtrl.provider.user?.findShareById(instance.createUser).name}
+                  <EntityIcon entityId={instance.createUser} showName />
                 </div>
               </div>
-              <Collapse ghost>{loadHeadForms(data.forms)}</Collapse>
+              {loadForms(data.forms)}
             </Card>
           </Timeline.Item>
           {instance.tasks?.map((task, _index) => {
@@ -96,18 +112,16 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
                             </div>
                             <div style={{ paddingRight: '24px' }}>
                               审批人：
-                              {
-                                orgCtrl.provider.user?.findShareById(record.createUser)
-                                  .name
-                              }
+                              <EntityIcon entityId={record.createUser} showName />
                             </div>
+                            <div>审批结果：{record.status < 200 ? '通过' : '拒绝'}</div>
                             <div>
                               {record.comment && <div>审批意见：{record.comment}</div>}
                             </div>
                           </div>
                           <Collapse ghost>
                             {task.node?.bindFroms &&
-                              loadForm(
+                              loadFormItem(
                                 task.node.bindFroms,
                                 task.status == 100,
                                 record.data,
@@ -128,7 +142,7 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
                         <div style={{ color: 'red' }}>待审批</div>
                       </div>
                       {task.node?.bindFroms &&
-                        loadForm(task.node.bindFroms, task.status == 100)}
+                        loadFormItem(task.node.bindFroms, task.status == 100)}
                     </Card>
                   </Timeline.Item>
                 )}
@@ -165,17 +179,6 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
           <div className={cls['content']}>
             {/** 时间轴 */}
             {loadTimeline()}
-            {/** 选中的操作对象 */}
-            {instance.thingIds?.length > 0 && (
-              <Thing
-                height={'400px'}
-                byIds={instance.thingIds.split(',').filter((id: any) => id != '')}
-                selectable={false}
-                labels={[]}
-                propertys={[]}
-                belongId={instance.belongId}
-              />
-            )}
           </div>
           <Card className={cls['bootom_right']}>
             <div style={{ display: 'flex', width: '100%' }}>
@@ -212,11 +215,7 @@ const Detail: React.FC<TaskDetailType> = ({ task, define, instance, onBack }) =>
     {
       key: '2',
       label: `流程图`,
-      children: instance?.define ? (
-        <Design current={define} instance={instance} IsEdit={false} />
-      ) : (
-        <></>
-      ),
+      children: <Design current={define} instance={instance} IsEdit={false} />,
     },
   ];
 
