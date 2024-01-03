@@ -1,234 +1,157 @@
-import { common, kernel, model, schema } from '../../base';
-import { PageAll, storeCollName } from '../public/consts';
-import { SpeciesType, TaskStatus } from '../public/enums';
-import { IPerson } from '../target/person';
-import { IApplication } from '../thing/app/application';
-import { IWorkDefine } from '../thing/base/flow';
-// 历史任务存储集合名称
-const hisWorkCollName = 'work-task';
+import { common, kernel, schema } from '../../base';
+import { TaskStatus } from '../public/enums';
+import { UserProvider } from '../user';
+import { IWorkTask, TaskTypeName, WorkTask } from './task';
+/** 任务集合名 */
+const TaskCollName = 'work-task';
 export interface IWorkProvider {
+  /** 用户ID */
+  userId: string;
   /** 当前用户 */
-  user: IPerson;
+  user: UserProvider;
   /** 待办 */
-  todos: schema.XWorkTask[];
+  todos: IWorkTask[];
   /** 变更通知 */
   notity: common.Emitter;
-  /** 加载待办任务 */
-  loadTodos(reload?: boolean): Promise<schema.XWorkTask[]>;
-  /** 加载已办任务 */
-  loadDones(req: model.IdModel): Promise<schema.XWorkRecordArray>;
-  /** 加载我发起的办事任务 */
-  loadApply(req: model.IdModel): Promise<model.PageResult<schema.XWorkTask>>;
   /** 任务更新 */
   updateTask(task: schema.XWorkTask): void;
-  /** 任务审批 */
-  approvalTask(
-    tasks: schema.XWorkTask[],
-    status: number,
-    comment?: string,
-    data?: string,
-  ): Promise<void>;
-  /** 查询任务明细 */
-  loadTaskDetail(task: schema.XWorkTask): Promise<schema.XWorkInstance | undefined>;
-  /** 查询流程定义 */
-  findFlowDefine(defineId: string): Promise<IWorkDefine | undefined>;
-  /** 删除办事实例 */
-  deleteInstance(id: string): Promise<boolean>;
-  /** 根据表单id查询表单特性 */
-  loadAttributes(id: string, belongId: string): Promise<schema.XAttribute[]>;
-  /** 根据字典id查询字典项 */
-  loadItems(id: string): Promise<schema.XDictItem[]>;
+  /** 加载实例详情 */
+  loadInstanceDetail(
+    id: string,
+    belongId: string,
+  ): Promise<schema.XWorkInstance | undefined>;
+  /** 加载待办 */
+  loadTodos(reload?: boolean): Promise<IWorkTask[]>;
+  /** 加载任务数量 */
+  loadTaskCount(typeName: TaskTypeName): Promise<number>;
+  /** 加载任务事项 */
+  loadContent(typeName: TaskTypeName, reload?: boolean): Promise<IWorkTask[]>;
 }
 
 export class WorkProvider implements IWorkProvider {
-  constructor(_user: IPerson) {
+  constructor(_user: UserProvider) {
     this.user = _user;
+    this.userId = _user.user!.id;
     this.notity = new common.Emitter();
     kernel.on('RecvTask', (data: schema.XWorkTask) => {
-      if (this._todoLoaded) {
+      if (this._todoLoaded && data.approveType != '抄送') {
         this.updateTask(data);
       }
     });
   }
-  user: IPerson;
+  userId: string;
+  user: UserProvider;
   notity: common.Emitter;
-  todos: schema.XWorkTask[] = [];
+  todos: IWorkTask[] = [];
   private _todoLoaded: boolean = false;
   updateTask(task: schema.XWorkTask): void {
-    const index = this.todos.findIndex((i) => i.id === task.id);
-    if (task.status < TaskStatus.ApprovalStart) {
-      if (index < 0) {
-        this.todos.unshift(task);
+    const index = this.todos.findIndex((i) => i.metadata.id === task.id);
+    if (index > -1) {
+      if (task.status < TaskStatus.ApprovalStart) {
+        this.todos[index].updated(task);
       } else {
-        this.todos[index] = task;
+        this.todos.splice(index, 1);
       }
-    } else if (index > -1) {
-      this.todos.splice(index, 1);
+      this.notity.changCallback();
+    } else {
+      if (task.status < TaskStatus.ApprovalStart) {
+        this.todos.unshift(new WorkTask(task, this.user));
+        this.notity.changCallback();
+      }
     }
-    this.notity.changCallback();
   }
-  async loadTodos(reload?: boolean): Promise<schema.XWorkTask[]> {
+  async loadContent(
+    typeName: TaskTypeName,
+    reload: boolean = false,
+  ): Promise<IWorkTask[]> {
+    if (typeName === '待办') {
+      return await this.loadTodos(reload);
+    }
+    return await this.loadTasks(typeName, 0);
+  }
+  async loadTodos(reload: boolean = false): Promise<IWorkTask[]> {
     if (!this._todoLoaded || reload) {
-      let res = await kernel.queryApproveTask({ id: '0', page: PageAll });
+      let res = await kernel.queryApproveTask({ id: '0' });
       if (res.success) {
         this._todoLoaded = true;
-        this.todos = res.data.result || [];
+        this.todos = (res.data.result || []).map((task) => new WorkTask(task, this.user));
         this.notity.changCallback();
       }
     }
     return this.todos;
   }
-  async loadDones(req: model.IdModel): Promise<schema.XWorkRecordArray> {
-    const res = await kernel.anystore.pageRequest<schema.XWorkTask>(
-      this.user.id,
-      hisWorkCollName,
+  async loadTasks(typeName: TaskTypeName, skip: number = 0): Promise<IWorkTask[]> {
+    const tasks: IWorkTask[] = [];
+    const result = await kernel.collectionLoad<schema.XWorkTask[]>(
+      this.userId,
+      [],
+      TaskCollName,
       {
-        match: {
-          belongId: req.id,
+        options: {
+          match: this._typeMatch(typeName),
+          sort: {
+            createTime: -1,
+          },
+        },
+        skip: skip,
+        take: 30,
+      },
+    );
+    if (result.success && result.data && result.data.length > 0) {
+      result.data.forEach((item) => {
+        if (tasks.every((i) => i.id != item.id)) {
+          tasks.push(new WorkTask(item, this.user, true));
+        }
+      });
+    }
+    return tasks.filter((i) => i.isTaskType(typeName));
+  }
+  async loadTaskCount(typeName: TaskTypeName): Promise<number> {
+    const res = await kernel.collectionLoad(this.userId, [], TaskCollName, {
+      options: {
+        match: this._typeMatch(typeName),
+      },
+      isCountQuery: true,
+    });
+    if (res.success) {
+      return res.totalCount;
+    }
+    return 0;
+  }
+  async loadInstanceDetail(
+    id: string,
+    belongId: string,
+  ): Promise<schema.XWorkInstance | undefined> {
+    return await kernel.findInstance(belongId, id);
+  }
+  private _typeMatch(typeName: TaskTypeName): any {
+    switch (typeName) {
+      case '已办':
+        return {
           status: {
             _gte_: 100,
           },
           records: {
             _exists_: true,
           },
-        },
-        sort: {
-          createTime: -1,
-        },
-      },
-      req.page,
-    );
-    return {
-      ...res.data,
-      result: (res.data.result || [])
-        .map((i) => {
-          if (i.records && i.records.length > 0) {
-            i.records[0].task = i;
-            return i.records[0];
-          }
-          return undefined;
-        })
-        .filter((i) => i != undefined)
-        .map((i) => i!),
-    };
-  }
-  async loadApply(req: model.IdModel): Promise<model.PageResult<schema.XWorkTask>> {
-    const res = await kernel.anystore.pageRequest<schema.XWorkTask>(
-      this.user.id,
-      hisWorkCollName,
-      {
-        match: {
-          belongId: req.id,
-          createUser: this.user.id,
+        };
+      case '发起的':
+        return {
+          createUser: this.userId,
           nodeId: {
             _exists_: false,
           },
-        },
-        sort: {
-          createTime: -1,
-        },
-      },
-      req.page,
-    );
-    return res.data;
-  }
-  async approvalTask(
-    tasks: schema.XWorkTask[],
-    status: number,
-    comment: string,
-    data: any,
-  ): Promise<void> {
-    for (const task of tasks) {
-      if (task.status < TaskStatus.ApprovalStart) {
-        if (status === -1) {
-          await kernel.recallWorkInstance({
-            id: task.id,
-            page: PageAll,
-          });
-        } else {
-          const res = await kernel.approvalTask({
-            id: task.id,
-            status: status,
-            comment: comment,
-            data: data,
-          });
-          if (res.data && status < TaskStatus.RefuseStart && task.taskType == '加用户') {
-            let targets = <Array<schema.XTarget>>JSON.parse(task.content);
-            if (targets.length == 2) {
-              for (const item of this.user.targets) {
-                if (item.id === targets[1].id) {
-                  item.pullMembers([targets[0]]);
-                }
-              }
-            }
-          }
-        }
-      }
+        };
+      case '抄送':
+        return {
+          approveType: '抄送',
+        };
+      default:
+        return {
+          status: {
+            _lt_: 100,
+          },
+        };
     }
-  }
-  async loadTaskDetail(
-    task: schema.XWorkTask,
-  ): Promise<schema.XWorkInstance | undefined> {
-    const res = await kernel.anystore.aggregate(
-      task.belongId,
-      storeCollName.WorkInstance,
-      {
-        match: {
-          id: task.instanceId,
-        },
-        limit: 1,
-        lookup: {
-          from: storeCollName.WorkTask,
-          localField: 'id',
-          foreignField: 'instanceId',
-          as: 'tasks',
-        },
-      },
-    );
-    if (res.data && res.data.length > 0) {
-      return res.data[0];
-    }
-  }
-  async findFlowDefine(defineId: string): Promise<IWorkDefine | undefined> {
-    for (const target of this.user.targets) {
-      for (const species of target.species) {
-        const defines: IWorkDefine[] = [];
-        switch (species.typeName) {
-          case SpeciesType.Market:
-          case SpeciesType.Application:
-            defines.push(...(await (species as IApplication).loadWorkDefines()));
-            break;
-        }
-        for (const define of defines) {
-          if (define.id === defineId) {
-            return define;
-          }
-        }
-      }
-    }
-  }
-  async deleteInstance(id: string): Promise<boolean> {
-    const res = await kernel.recallWorkInstance({ id, page: PageAll });
-    return res.success;
-  }
-  async loadAttributes(id: string, belongId: string): Promise<schema.XAttribute[]> {
-    const res = await kernel.queryFormAttributes({
-      id: id,
-      subId: belongId,
-    });
-    if (res.success) {
-      return res.data.result || [];
-    }
-    return [];
-  }
-  async loadItems(id: string): Promise<schema.XDictItem[]> {
-    const res = await kernel.queryDictItems({
-      id: id,
-      page: PageAll,
-    });
-    if (res.success) {
-      return res.data.result || [];
-    }
-    return [];
   }
 }

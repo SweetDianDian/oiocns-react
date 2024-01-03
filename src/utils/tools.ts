@@ -2,7 +2,7 @@ import { model } from '@/ts/base';
 import moment from 'moment';
 import { message } from 'antd';
 import { formatDate } from '@/utils/index';
-import { DataType, MenuItemType, PageData } from 'typings/globelType';
+import { DataType, MenuItemType, OperateMenuType, PageData } from 'typings/globelType';
 
 const dateFormat: string = 'YYYY-MM-DD';
 
@@ -17,7 +17,7 @@ const showMessage = (response: any) => {
 const debounce = (fun: any, delay?: number) => {
   let timer: any = '';
   let that = this;
-  return (...args: any) => {
+  return (...args: any[]) => {
     clearTimeout(timer);
     timer = setTimeout(function () {
       fun.call(that, ...args);
@@ -95,11 +95,11 @@ const showChatTime = (chatDate: moment.MomentInput) => {
   const days = moment().diff(date, 'day');
   switch (days) {
     case 0:
-      return cdate.format('H:mm');
+      return cdate.format('H:mm:ss');
     case 1:
-      return '昨天 ' + cdate.format('H:mm');
+      return '昨天 ' + cdate.format('H:mm:ss');
     case 2:
-      return '前天 ' + cdate.format('H:mm');
+      return '前天 ' + cdate.format('H:mm:ss');
   }
   const year = moment().diff(cdate, 'year');
   if (year == 0) {
@@ -165,20 +165,20 @@ const getUuid = () => {
 
 const findAimObj = (isParent = false, id: string, topParentData?: any[]) => {
   let aimObjet: any = undefined;
-  function findItem(_id: string, parent: any) {
+  function findItem(id: string, parent: any) {
     const data = parent.children;
     if (aimObjet) {
       return aimObjet;
     }
     const AimObj = data.find((v: any) => {
-      return v.id == _id;
+      return v.id == id;
     });
     if (AimObj) {
       aimObjet = isParent ? parent : AimObj;
       return;
     } else {
       data.forEach((child: any) => {
-        return findItem(_id, child);
+        return findItem(id, child);
       });
     }
   }
@@ -279,6 +279,21 @@ const findMenuItemByKey = (item: MenuItemType, key: string): MenuItemType | unde
   return undefined;
 };
 
+const cleanMenus = (items?: OperateMenuType[]): OperateMenuType[] | undefined => {
+  const newItems = items?.map((i) => {
+    return {
+      key: i.key,
+      label: i.label,
+      icon: i.icon,
+      model: i.model,
+      children: cleanMenus(i.children),
+    } as OperateMenuType;
+  });
+  if (newItems && newItems.length > 0) {
+    return newItems;
+  }
+  return undefined;
+};
 /** url下载 */
 const downloadByUrl = (url: string) => {
   if (!url) {
@@ -290,7 +305,65 @@ const downloadByUrl = (url: string) => {
   DownA.click(); // 自执行点击事件
 };
 
+const truncateString = (str: string, maxLength: number) => {
+  if (str.length > maxLength) {
+    return str.slice(0, maxLength - 3) + '...';
+  }
+  return str;
+};
+
+/** 获取文件的实际地址 */
+const shareOpenLink = (link: string | undefined, download: boolean = false) => {
+  if (link?.startsWith('/orginone/kernel/load/')) {
+    return download ? `${link}?download=1` : link;
+  }
+  return `/orginone/kernel/load/${link}${download ? '?download=1' : ''}`;
+};
+
+/** 获取html文本中的字符串 */
+const parseHtmlToText = (html: string) => {
+  var text = html.replace(/\s*/g, ''); //去掉空格
+  text = text.replace(/<[^>]+>/g, ''); //去掉所有的html标记
+  text = text.replace(/↵/g, ''); //去掉所有的↵符号
+  return text.replace(/[\r\n]/g, ''); //去掉回车换行
+};
+
+/** 根据节点id获取节点信息 */
+const getNodeByNodeId = (
+  id: string,
+  node: model.WorkNodeModel | undefined,
+): model.WorkNodeModel | undefined => {
+  if (node) {
+    if (id === node.id) return node;
+    const find = getNodeByNodeId(id, node.children);
+    if (find) return find;
+    for (const subNode of node?.branches ?? []) {
+      const find = getNodeByNodeId(id, subNode.children);
+      if (find) return find;
+    }
+  }
+};
+
+const loadGatewayNodes = (
+  node: model.WorkNodeModel,
+  memberNodes: model.WorkNodeModel[],
+) => {
+  if (node.type == '网关') {
+    memberNodes.push(node);
+  }
+  if (node.children) {
+    memberNodes = loadGatewayNodes(node.children, memberNodes);
+  }
+  for (const branch of node.branches ?? []) {
+    if (branch.children) {
+      memberNodes = loadGatewayNodes(branch.children, memberNodes);
+    }
+  }
+  return memberNodes;
+};
+
 export {
+  cleanMenus,
   dateFormat,
   debounce,
   downloadByUrl,
@@ -298,13 +371,18 @@ export {
   findMenuItemByKey,
   formatZhDate,
   getNewKeyWithString,
+  getNodeByNodeId,
   getUuid,
   handleFormatDate,
+  loadGatewayNodes,
+  parseHtmlToText,
   pySegSort,
   pySegSortObj,
   renderNum,
   resetParams,
+  shareOpenLink,
   showChatTime,
   showMessage,
+  truncateString,
   validIsSocialCreditCode,
 };

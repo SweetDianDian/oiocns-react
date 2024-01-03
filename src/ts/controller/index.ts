@@ -1,36 +1,114 @@
-import { IPerson, UserProvider } from '@/ts/core';
+import { IApplication, IFile, IPerson, ISession, ITarget, UserProvider } from '@/ts/core';
 import { common } from '@/ts/base';
 import { IWorkProvider } from '../core/work/provider';
-import { IChatProvider } from '../core/chat/provider';
+import { IPageTemplate } from '../core/thing/standard/page';
+import { IBoxProvider } from '../core/work/box';
+import { AuthProvider } from '../core/auth';
+/** 控制器基类 */
+export class Controller extends common.Emitter {
+  public currentKey: string;
+  constructor(key: string) {
+    super();
+    this.currentKey = key;
+  }
+}
 /**
  * 设置控制器
  */
-class IndexController extends common.Emitter {
-  public currentKey: string = '';
-  private _provider: UserProvider;
+class IndexController extends Controller {
+  static _provider: UserProvider;
   constructor() {
-    super();
-    this._provider = new UserProvider(this);
+    super('');
+    if (IndexController._provider === undefined) {
+      IndexController._provider = new UserProvider(this);
+    }
   }
   /** 是否已登录 */
   get logined(): boolean {
-    return this._provider.user != undefined;
+    return this.provider.user != undefined;
   }
   /** 数据提供者 */
   get provider(): UserProvider {
-    return this._provider;
+    if (IndexController._provider === undefined) {
+      IndexController._provider = new UserProvider(this);
+    }
+    return IndexController._provider;
+  }
+  /** 授权方法 */
+  get auth(): AuthProvider {
+    return this.provider.auth;
   }
   /** 当前用户 */
   get user(): IPerson {
-    return this._provider.user!;
+    return this.provider.user!;
   }
   /** 办事提供者 */
   get work(): IWorkProvider {
-    return this._provider.work!;
+    return this.provider.work!;
   }
-  /** 会话提供者 */
-  get chat(): IChatProvider {
-    return this._provider.chat!;
+  /** 暂存提供者 */
+  get box(): IBoxProvider {
+    return this.provider.box!;
+  }
+  /** 所有相关的用户 */
+  get targets(): ITarget[] {
+    return this.provider.targets;
+  }
+  /** 退出 */
+  exit(): void {
+    sessionStorage.clear();
+    IndexController._provider = new UserProvider(this);
+  }
+  async loadApplications(): Promise<IApplication[]> {
+    const apps: IApplication[] = [];
+    for (const directory of this.targets
+      .filter((i) => i.session.isMyChat)
+      .map((a) => a.directory)) {
+      apps.push(...(await directory.loadAllApplication()));
+    }
+    return apps;
+  }
+  /** 加载所有常用 */
+  async loadCommons(): Promise<IFile[]> {
+    const files: IFile[] = [];
+    if (this.provider.user) {
+      for (const item of this.provider.user.commons) {
+        const target = this.provider.targets.find(
+          (i) => i.id === item.targetId && i.spaceId === item.spaceId,
+        );
+        if (target) {
+          const file = await target.directory.searchFile(
+            item.directoryId,
+            item.applicationId,
+            item.id,
+          );
+          if (file) {
+            files.push(file);
+          }
+        }
+      }
+    }
+    return files;
+  }
+  /** 所有相关会话 */
+  get chats(): ISession[] {
+    const chats: ISession[] = [];
+    if (this.provider.user) {
+      chats.push(...this.provider.user.chats);
+      for (const company of this.provider.user.companys) {
+        chats.push(...company.chats);
+      }
+    }
+    return chats;
+  }
+  /** 所有相关页面 */
+  async loadPages(): Promise<IPageTemplate[]> {
+    const pages: IPageTemplate[] = [];
+    for (const directory of this.targets.map((t) => t.directory)) {
+      const templates = await directory.loadAllTemplate();
+      pages.push(...templates.filter((item) => item.metadata.public));
+    }
+    return pages;
   }
 }
 

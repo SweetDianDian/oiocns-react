@@ -19,6 +19,7 @@ export enum TargetType {
   'Company' = '单位',
   'University' = '大学',
   'Hospital' = '医院',
+  'Storage' = '存储资源'
 }
 
 /** 分类基础类型 */
@@ -30,8 +31,8 @@ export enum SpeciesType {
   'Application' = '应用类',
   /** 类别类目 */
   'Flow' = '流程类',
-  'Work' = '事项类',
-  'Thing' = '实体类',
+  'Work' = '事项配置',
+  'Thing' = '实体配置',
   'Data' = '数据类',
 }
 
@@ -39,10 +40,13 @@ export enum SpeciesType {
 export enum MessageType {
   File = '文件',
   Text = '文本',
+  Html = '网页',
   Image = '图片',
   Video = '视频',
   Voice = '语音',
   Recall = '撤回',
+  Notify = '通知',
+  Forward = '转发',
 }
 
 /** 任务状态 */
@@ -71,4 +75,19 @@ export enum ValueType {
   'Time' = '时间型',
   'Date' = '日期型',
   'Target' = '用户型',
+  'Reference' = '引用型'
+}
+
+/** 规则触发时机 */
+export enum RuleTriggers {
+  'Start' = 'Start',//初始化
+  'Running' = 'Running',//修改后
+  'Submit' = 'Submit',//提交前
+  'ThingsChanged' = 'ThingsChanged',//子表变化后
+}
+
+/** 个人 群组 */
+export enum FromOrigin {
+  'Person' = 'Person',
+  'Group' = 'Group',
 }

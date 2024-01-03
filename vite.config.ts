@@ -2,10 +2,8 @@ import dayjs from 'dayjs';
 import path from 'path';
 import type { ConfigEnv, UserConfig } from 'vite';
 
-import { PORT, VITE_BASE_PATH, VITE_DROP_CONSOLE } from './config/constant';
 import { themeVariables } from './config/theme';
 import { createVitePlugins } from './config/vite/plugins';
-import { createProxy } from './config/vite/proxy';
 import pkg from './package.json';
 
 const { dependencies, devDependencies, name, version } = pkg;
@@ -18,10 +16,8 @@ const __APP_INFO__ = {
 export default ({ command, mode }: ConfigEnv): UserConfig => {
   const isBuild = command === 'build';
 
-  console.log({ command, mode });
-
   return {
-    base: VITE_BASE_PATH,
+    base: '/',
     plugins: createVitePlugins(mode, isBuild),
     css: {
       preprocessorOptions: {
@@ -42,28 +38,31 @@ export default ({ command, mode }: ConfigEnv): UserConfig => {
       // 是否主动唤醒浏览器
       open: false,
       // 占用端口 开发环境启动的端口
-      port: PORT,
+      port: 8080,
       // 是否使用https请求
-      //  https: ,
+      //  https: true,
       // 扩展访问端口
       host: true,
       hmr: true,
       watch: {
         usePolling: true, // WSL必须,否则热更新无效
       },
-      proxy: createProxy(),
+      proxy: {
+        '/orginone': {
+          target: 'https://asset.orginone.cn', // 后台接口
+          changeOrigin: true, // 是否允许跨域
+          ws: true,
+        },
+      },
     },
     build: {
-      target: 'es5',
       outDir: 'dist', // 指定输出路径
       minify: 'terser', // 混淆器,terser构建后文件体积更小
       sourcemap: false, // 输出.map文件
-      chunkSizeWarningLimit: 8192,
+      chunkSizeWarningLimit: 2048,
       terserOptions: {
         compress: {
-          drop_console: VITE_DROP_CONSOLE, // 生产环境移除console
           drop_debugger: true, // 生产环境移除debugger
-          pure_funcs: ['console.log'],
         },
         output: {
           // 去掉注释内容
@@ -71,23 +70,46 @@ export default ({ command, mode }: ConfigEnv): UserConfig => {
         },
       },
       rollupOptions: {
-        // 确保外部化处理那些你不想打包进库的依赖
-        // external: ['react', 'antd'], // 注意看这里
         treeshake: false,
+        external: ['handsontable'],
         output: {
-          chunkFileNames: 'static/js/[name]-[hash].js',
-          entryFileNames: 'static/js/[name]-[hash].js',
-          assetFileNames: 'static/[ext]/[name]-[hash].[ext]',
-          // manualChunks(id) {
-          //   // if (id.includes('components')) {
-          //   //   // 把 components 文件里面的文件都打包到 components.js 中
-          //   //   return 'components'
-          //   // }
-          //   // 静态资源拆分
-          //   if (id.includes('node_modules')) {
-          //     return id.toString().split('node_modules/')[1].split('/')[0].toString();
-          //   }
-          // },
+          chunkFileNames: 'static/js/[hash].js',
+          entryFileNames: 'static/js/[hash].js',
+          assetFileNames: 'static/[ext]/[hash].[ext]',
+          manualChunks: {
+            'react-vendor': [
+              'react',
+              'react-use',
+              'react-dom',
+              'react-icons',
+              'qrcode.react',
+              'react-router-dom',
+              'react-office-viewer',
+              'react-router-config',
+            ],
+            'antv-vendor': [
+              '@antv/x6',
+              '@antv/x6-plugin-dnd',
+              '@antv/x6-react-shape',
+              '@antv/x6-plugin-selection',
+            ],
+            'editor-vendor': [
+              'for-editor',
+              'html2canvas',
+              '@wangeditor/editor',
+              '@wangeditor/editor-for-react',
+            ],
+            'uiw-vendor': [
+              '@uiw/codemirror-extensions-langs',
+              '@uiw/codemirror-theme-vscode',
+              '@uiw/react-codemirror',
+            ],
+            'xlsx-vendor': ['xlsx'],
+            'play-vendor': ['jol-player'],
+            'dev-vendor': ['devextreme-react'],
+            'emoji-vendor': ['@emoji-mart/react', '@emoji-mart/data', 'emoji-mart'],
+            'antd-vendor': ['antd', '@ant-design/icons', '@ant-design/pro-components'],
+          },
         },
         plugins: [
           {

@@ -276,13 +276,74 @@ function getScrollX(propsColumns: { [key: string]: any }[]) {
   return { columnsRes, scrollx };
 }
 
+function getJsonText(fileUrl: string): Promise<string> {
+  return new Promise((ok, error) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', fileUrl);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState === XMLHttpRequest.DONE) {
+        if (xhr.status === 200) {
+          // 获取响应数据的原始文本内容
+          const rawText = xhr.responseText;
+          ok(rawText);
+        } else {
+          error('请求失败');
+        }
+      }
+    };
+    xhr.send();
+  });
+}
+
+const ellipsisText = (text: string, length: number) => {
+  if (text.length > length) {
+    return text.substring(0, length) + '...';
+  }
+  return text;
+};
+
+/**
+ * 根据传入keys顺序，对传入obj对象键值对排序
+ * @param obj
+ * @param sortedKeys
+ */
+function sortObjByKeys<T extends object>(obj: T, sortedKeys: string[]): T {
+  const sortedObj: Partial<T> = {};
+  sortedKeys.forEach((key) => {
+    if (obj?.hasOwnProperty(key)) {
+      sortedObj[key as keyof T] = obj[key as keyof T];
+    }
+  });
+  // 将原对象的其他键值对复制到排序后的对象中
+  for (const key in obj) {
+    if (!sortedObj.hasOwnProperty(key)) sortedObj[key] = obj[key];
+  }
+  return sortedObj as T;
+}
+
+/**
+ * 赋给新对象中没有的老对象的值
+ * @param old
+ */
+function assignment(oldObj: { [key: string]: any }, newObj: { [key: string]: any }) {
+  Object.keys(oldObj).forEach((key) => {
+    if (!(key in newObj)) {
+      newObj[key] = oldObj[key];
+    }
+  });
+}
+
 export {
+  assignment,
+  ellipsisText,
   filterEmptyPropObj,
   formatDate,
   formatTimeAgo,
+  getJsonText,
   getQueryString,
   getScrollX,
   isEmoji,
   isSpecialChar,
+  sortObjByKeys,
   visitTree,
 };

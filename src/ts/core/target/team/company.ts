@@ -1,15 +1,18 @@
 import { kernel, model, schema } from '@/ts/base';
 import { IBelong, Belong } from '../base/belong';
-import { ICohort, Cohort } from '../outTeam/cohort';
 import { IGroup, Group } from '../outTeam/group';
 import { IDepartment, Department } from '../innerTeam/department';
 import { IStation, Station } from '../innerTeam/station';
 import { IPerson } from '../person';
 import { PageAll } from '../../public/consts';
 import { TargetType } from '../../public/enums';
-import { IMsgChat } from '../../chat/message/msgchat';
 import { ITarget } from '../base/target';
 import { ITeam } from '../base/team';
+import { targetOperates } from '../../public';
+import { Storage } from '../outTeam/storage';
+import { Cohort } from '../outTeam/cohort';
+import { ISession } from '../../chat/session';
+import { IFile } from '../../thing/fileinfo';
 
 /** 单位类型接口 */
 export interface ICompany extends IBelong {
@@ -25,8 +28,6 @@ export interface ICompany extends IBelong {
   exit(): Promise<boolean>;
   /** 加载组织集群 */
   loadGroups(reload?: boolean): Promise<IGroup[]>;
-  /** 加载创建的群 */
-  loadStations(reload?: boolean): Promise<IStation[]>;
   /** 加载单位的部门 */
   loadDepartments(reload?: boolean): Promise<IDepartment[]>;
   /** 设立岗位 */
@@ -40,13 +41,13 @@ export interface ICompany extends IBelong {
 /** 单位类型实现 */
 export class Company extends Belong implements ICompany {
   constructor(_metadata: schema.XTarget, _user: IPerson) {
-    super(_metadata, ['全员群'], _user);
+    super(_metadata, [_metadata.id], _user);
     this.departmentTypes = [
+      TargetType.Department,
       TargetType.Office,
       TargetType.Working,
       TargetType.Research,
       TargetType.Laboratory,
-      TargetType.Department,
     ];
   }
   groups: IGroup[] = [];
@@ -54,61 +55,55 @@ export class Company extends Belong implements ICompany {
   departments: IDepartment[] = [];
   departmentTypes: string[] = [];
   private _groupLoaded: boolean = false;
-  private _cohortLoaded: boolean = false;
-  private _stationLoaded: boolean = false;
   private _departmentLoaded: boolean = false;
   async loadGroups(reload: boolean = false): Promise<IGroup[]> {
     if (!this._groupLoaded || reload) {
       const res = await kernel.queryJoinedTargetById({
         id: this.id,
-        typeNames: [TargetType.Group],
+        typeNames: [TargetType.Group, TargetType.Storage],
         page: PageAll,
       });
       if (res.success) {
         this._groupLoaded = true;
-        this.groups = (res.data.result || []).map((i) => new Group(i, this));
+        this.storages = [];
+        this.groups = [];
+        (res.data.result || []).forEach((i) => {
+          switch (i.typeName) {
+            case TargetType.Storage:
+              this.storages.push(new Storage(i, [this.id], this));
+              break;
+            default:
+              this.groups.push(new Group([this.key], i, [this.id], this));
+          }
+        });
       }
     }
     return this.groups;
-  }
-  async loadCohorts(reload?: boolean | undefined): Promise<ICohort[]> {
-    if (!this._cohortLoaded || reload) {
-      const res = await kernel.querySubTargetById({
-        id: this.id,
-        subTypeNames: [TargetType.Cohort],
-        page: PageAll,
-      });
-      if (res.success) {
-        this._cohortLoaded = true;
-        this.cohorts = (res.data.result || []).map((i) => new Cohort(i, this));
-      }
-    }
-    return this.cohorts;
-  }
-  async loadStations(reload?: boolean | undefined): Promise<IStation[]> {
-    if (!this._stationLoaded || reload) {
-      const res = await kernel.querySubTargetById({
-        id: this.id,
-        subTypeNames: [TargetType.Station],
-        page: PageAll,
-      });
-      if (res.success) {
-        this._stationLoaded = true;
-        this.stations = (res.data.result || []).map((i) => new Station(i, this));
-      }
-    }
-    return this.stations;
   }
   async loadDepartments(reload?: boolean | undefined): Promise<IDepartment[]> {
     if (!this._departmentLoaded || reload) {
       const res = await kernel.querySubTargetById({
         id: this.id,
-        subTypeNames: this.departmentTypes,
+        subTypeNames: [...this.departmentTypes, TargetType.Cohort, TargetType.Station],
         page: PageAll,
       });
       if (res.success) {
         this._departmentLoaded = true;
-        this.departments = (res.data.result || []).map((i) => new Department(i, this));
+        this.departments = [];
+        this.stations = [];
+        this.cohorts = [];
+        (res.data.result || []).forEach((i) => {
+          switch (i.typeName) {
+            case TargetType.Cohort:
+              this.cohorts.push(new Cohort(i, this, this.id));
+              break;
+            case TargetType.Station:
+              this.stations.push(new Station(i, this));
+              break;
+            default:
+              this.departments.push(new Department([this.key], i, this));
+          }
+        });
       }
     }
     return this.departments;
@@ -117,10 +112,10 @@ export class Company extends Belong implements ICompany {
     data.typeName = TargetType.Group;
     const metadata = await this.create(data);
     if (metadata) {
-      const group = new Group(metadata, this);
-      await group.deepLoad();
+      const group = new Group([this.key], metadata, [this.id], this);
       this.groups.push(group);
       await group.pullMembers([this.metadata]);
+      await group.deepLoad();
       return group;
     }
   }
@@ -131,7 +126,7 @@ export class Company extends Belong implements ICompany {
     data.public = false;
     const metadata = await this.create(data);
     if (metadata) {
-      const department = new Department(metadata, this);
+      const department = new Department([this.key], metadata, this);
       await department.deepLoad();
       if (await this.pullSubTarget(department)) {
         this.departments.push(department);
@@ -165,7 +160,10 @@ export class Company extends Belong implements ICompany {
   }
   async applyJoin(members: schema.XTarget[]): Promise<boolean> {
     for (const member of members) {
-      if (member.typeName === TargetType.Group) {
+      if (
+        member.typeName === TargetType.Group ||
+        member.typeName === TargetType.Storage
+      ) {
         await kernel.applyJoinTeam({
           id: member.id,
           subId: this.id,
@@ -177,16 +175,18 @@ export class Company extends Belong implements ICompany {
   async exit(): Promise<boolean> {
     if (await this.removeMembers([this.user.metadata])) {
       this.user.companys = this.user.companys.filter((i) => i.key != this.key);
+      this.user.changCallback();
       return true;
     }
     return false;
   }
   override async delete(notity: boolean = false): Promise<boolean> {
-    notity = await super.delete(notity);
-    if (notity) {
+    const success = await super.delete(notity);
+    if (success) {
       this.user.companys = this.user.companys.filter((i) => i.key != this.key);
+      this.user.changCallback();
     }
-    return notity;
+    return success;
   }
   get subTarget(): ITarget[] {
     return [...this.departments, ...this.cohorts];
@@ -197,25 +197,19 @@ export class Company extends Belong implements ICompany {
   get parentTarget(): ITarget[] {
     return this.groups;
   }
-  get chats(): IMsgChat[] {
-    const chats: IMsgChat[] = [this];
+  get chats(): ISession[] {
+    const chats: ISession[] = [this.session];
     chats.push(...this.cohortChats);
     chats.push(...this.memberChats);
     return chats;
   }
-  get cohortChats(): IMsgChat[] {
-    const chats: IMsgChat[] = [];
+  get cohortChats(): ISession[] {
+    const chats: ISession[] = [];
     for (const item of this.departments) {
-      chats.push(...item.chats);
-    }
-    for (const item of this.stations) {
       chats.push(...item.chats);
     }
     for (const item of this.cohorts) {
       chats.push(...item.chats);
-    }
-    if (this.superAuth) {
-      chats.push(...this.superAuth.chats);
     }
     return chats;
   }
@@ -227,29 +221,51 @@ export class Company extends Belong implements ICompany {
     for (const item of this.departments) {
       targets.push(...item.targets);
     }
+    for (const item of this.cohorts) {
+      targets.push(...item.targets);
+    }
+    for (const item of this.storages) {
+      targets.push(...item.targets);
+    }
     return targets;
   }
   async deepLoad(reload: boolean = false): Promise<void> {
-    await this.loadGroups(reload);
-    await this.loadDepartments(reload);
-    await this.loadStations(reload);
-    await this.loadCohorts(reload);
-    await this.loadMembers(reload);
-    await this.loadSuperAuth(reload);
-    await this.loadSpecies(reload);
-    for (const group of this.groups) {
-      await group.deepLoad(reload);
-    }
-    for (const department of this.departments) {
-      await department.deepLoad(reload);
-    }
-    for (const station of this.stations) {
-      await station.deepLoad(reload);
-    }
-    for (const cohort of this.cohorts) {
-      await cohort.deepLoad(reload);
-    }
+    await Promise.all([
+      this.loadGroups(reload),
+      this.loadDepartments(reload),
+      this.loadMembers(reload),
+      this.loadSuperAuth(reload),
+      this.loadIdentitys(reload),
+    ]);
+    await Promise.all(this.groups.map((group) => group.deepLoad(reload)));
+    await Promise.all(this.departments.map((department) => department.deepLoad(reload)));
+    await Promise.all(this.stations.map((station) => station.deepLoad(reload)));
+    await Promise.all(this.cohorts.map((cohort) => cohort.deepLoad(reload)));
+    await Promise.all(this.storages.map((storage) => storage.deepLoad(reload)));
     this.superAuth?.deepLoad(reload);
+    this.directory.loadDirectoryResource(reload);
+  }
+
+  override operates(): model.OperateModel[] {
+    const operates = super.operates();
+    if (this.hasRelationAuth()) {
+      operates.unshift(
+        targetOperates.JoinGroup,
+        targetOperates.JoinStorage,
+        targetOperates.NewGroup,
+        targetOperates.NewDepartment,
+      );
+    }
+    return operates;
+  }
+
+  content(): IFile[] {
+    return [
+      ...this.groups,
+      ...this.departments,
+      ...this.cohorts,
+      ...this.storages,
+    ].filter((i) => i.isMyTeam);
   }
 
   override async removeMembers(
@@ -263,16 +279,45 @@ export class Company extends Belong implements ICompany {
     return notity;
   }
 
-  async teamChangedNotity(target: schema.XTarget): Promise<boolean> {
+  override async _removeJoinTarget(target: schema.XTarget): Promise<string> {
+    var find = [...this.groups, ...this.storages].find((i) => i.id === target.id);
+    if (find) {
+      await find.delete(true);
+      return `${this.name}已被从${target.name}移除.`;
+    }
+    return '';
+  }
+
+  override async _addJoinTarget(target: schema.XTarget): Promise<string> {
     switch (target.typeName) {
-      case TargetType.Person:
-        return this.pullMembers([target], true);
       case TargetType.Group:
         if (this.groups.every((i) => i.id != target.id)) {
-          const group = new Group(target, this);
+          const group = new Group([this.key], target, [this.id], this);
           await group.deepLoad();
           this.groups.push(group);
-          return true;
+          return `${this.name}已成功加入到${target.name}.`;
+        }
+        break;
+      case TargetType.Storage:
+        if (this.storages.every((i) => i.id != target.id)) {
+          const storage = new Storage(target, [], this);
+          await storage.deepLoad();
+          this.storages.push(storage);
+          return `${this.name}已成功加入到${target.name}.`;
+        }
+        break;
+    }
+    return '';
+  }
+
+  override async _addSubTarget(target: schema.XTarget): Promise<string> {
+    switch (target.typeName) {
+      case TargetType.Cohort:
+        if (this.cohorts.every((i) => i.id != target.id)) {
+          const cohort = new Cohort(target, this, this.id);
+          await cohort.deepLoad();
+          this.cohorts.push(cohort);
+          return `${this.name}创建了${target.name}.`;
         }
         break;
       case TargetType.Station:
@@ -280,27 +325,20 @@ export class Company extends Belong implements ICompany {
           const station = new Station(target, this);
           await station.deepLoad();
           this.stations.push(station);
-          return true;
-        }
-        break;
-      case TargetType.Cohort:
-        if (this.cohorts.every((i) => i.id != target.id)) {
-          const cohort = new Cohort(target, this);
-          await cohort.deepLoad();
-          this.cohorts.push(cohort);
-          return true;
+          return `${this.name}创建了${target.name}.`;
         }
         break;
       default:
         if (this.departmentTypes.includes(target.typeName as TargetType)) {
           if (this.departments.every((i) => i.id != target.id)) {
-            const department = new Department(target, this);
+            const department = new Department([this.key], target, this);
             await department.deepLoad();
             this.departments.push(department);
-            return true;
+            return `${this.name}创建了${target.name}.`;
           }
         }
+        break;
     }
-    return false;
+    return '';
   }
 }

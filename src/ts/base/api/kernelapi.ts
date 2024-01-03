@@ -1,56 +1,70 @@
-import AnyStore from './anystore';
 import StoreHub from './storehub';
 import * as model from '../model';
 import type * as schema from '../schema';
-import axios from 'axios';
 import { logger } from '../common';
 /**
  * 资产共享云内核api
  */
 export default class KernelApi {
+  // 当前用户
+  user: schema.XTarget | undefined;
   // 存储集线器
   private _storeHub: StoreHub;
-  // axios实例
-  private readonly _axiosInstance = axios.create({});
   // 单例
   private static _instance: KernelApi;
-  // 任意数据存储对象
-  private _anystore: AnyStore;
-  // 订阅方法
+  // 必达消息缓存
+  private _cacheData: any = {};
+  // 当前连接ID
+  private _connectionId: string = '';
+  // 监听方法
   private _methods: { [name: string]: ((...args: any[]) => void)[] };
+  // 订阅方法
+  private _subMethods: {
+    [name: string]: {
+      keys: string[];
+      operation: (...args: any[]) => void;
+    }[];
+  };
+  // 获取accessToken
+  public get accessToken(): string {
+    return sessionStorage.getItem('accessToken') || '';
+  }
+  // 设置accessToken
+  private set accessToken(val: string) {
+    sessionStorage.setItem('accessToken', val);
+  }
   /**
    * 私有构造方法
    * @param url 远端地址
    */
   private constructor(url: string) {
     this._methods = {};
-    this._anystore = AnyStore.getInstance();
-    this._storeHub = new StoreHub(url, 'json');
-    this._storeHub.on('Receive', (res: model.ReceiveType) => {
-      const methods = this._methods[res.target.toLowerCase()];
-      if (methods) {
-        try {
-          methods.forEach((m) => m.apply(this, [res.data]));
-        } catch (e) {
-          logger.error(e as Error);
-        }
-      }
-    });
+    this._subMethods = {};
+    this._storeHub = new StoreHub(url, 'txt');
+    this._storeHub.on('Receive', (res) => this._receive(res));
     this._storeHub.onConnected(() => {
-      if (this._anystore.accessToken.length > 0) {
-        this._storeHub
-          .invoke('TokenAuth', this._anystore.accessToken)
-          .then((res: model.ResultType<any>) => {
-            if (res.success) {
-              logger.info('连接到内核成功!');
-            }
-          })
-          .catch((err) => {
-            logger.error(err);
-          });
-      }
+      this._storeHub.send<string>('GetConnectionId').then((id) => {
+        if (id && id.length > 0) {
+          this._connectionId = id;
+        }
+      });
+      this.tokenAuth().then((success) => {
+        if (success) {
+          logger.info('连接到内核成功!');
+        }
+      });
     });
     this._storeHub.start();
+  }
+
+  /**
+   * 实时获取连接状态
+   * @param callback
+   */
+  public async onConnectedChanged(callback: (res: boolean) => void) {
+    callback.apply(this, [this._storeHub.isConnected]);
+    this._storeHub.onDisconnected(() => callback.apply(this, [false]));
+    this._storeHub.onConnected(() => callback.apply(this, [true]));
   }
   /**
    * 获取单例
@@ -64,11 +78,11 @@ export default class KernelApi {
     return this._instance;
   }
   /**
-   * 任意数据存储对象
-   * @returns {AnyStore | undefined} 可能为空的存储对象
+   * 链接ID
+   * @returns {string} 链接ID
    */
-  public get anystore(): AnyStore {
-    return this._anystore;
+  public get connectionId(): string {
+    return this._connectionId;
   }
   /**
    * 是否在线
@@ -77,97 +91,34 @@ export default class KernelApi {
   public get isOnline(): boolean {
     return this._storeHub.isConnected;
   }
-  /**
-   * 登录到后台核心获取accessToken
-   * @param userName 用户名
-   * @param password 密码
-   * @returns {Promise<model.ResultType<any>>} 异步登录结果
-   */
-  public async login(userName: string, password: string): Promise<model.ResultType<any>> {
-    var res: model.ResultType<any>;
-    var req = {
-      account: userName,
-      pwd: password,
-    };
-    if (this._storeHub.isConnected) {
-      res = await this._storeHub.invoke('Login', req);
-    } else {
-      res = await this._restRequest('login', req);
+  /** 连接信息 */
+  public async onlines(): Promise<model.OnlineSet | undefined> {
+    const result = await this._storeHub.invoke('Online');
+    if (result.success && result.data) {
+      return result.data;
     }
-    if (res.success) {
-      await this._anystore.updateToken(res.data.accessToken);
-    }
-    return res;
   }
-  /**
-   * 重置密码
-   * @param userName 用户名
-   * @param password 密码
-   * @returns {Promise<model.ResultType<any>>}
-   */
-  public async resetPassword(
-    userName: string,
-    password: string,
-    privatekey: string,
-  ): Promise<model.ResultType<any>> {
-    var res: model.ResultType<any>;
-    var req = {
-      account: userName,
-      password: password,
-      privateKey: privatekey,
-    };
-    if (this._storeHub.isConnected) {
-      res = await this._storeHub.invoke('ResetPassword', req);
-    } else {
-      res = await this._restRequest('resetpassword', req);
-    }
-    return res;
-  }
-  /**
-   * 注册到后台核心获取accessToken
-   * @param name 姓名
-   * @param motto 座右铭
-   * @param phone 电话
-   * @param account 账户
-   * @param password 密码
-   * @param nickName 昵称
-   * @returns {Promise<model.ResultType<any>>} 异步注册结果
-   */
-  public async register(params: model.RegisterType): Promise<model.ResultType<any>> {
-    var res: model.ResultType<any>;
-    if (this._storeHub.isConnected) {
-      res = await this._storeHub.invoke('Register', params);
-    } else {
-      res = await this._restRequest('Register', params);
-    }
-    if (res.success) {
-      await this._anystore.updateToken(res.data.accessToken);
-    }
-    return res;
-  }
-  /**
-   * 创建日志记录
-   * @param {model.LogModel} params 请求参数
-   * @returns {model.ResultType<schema.XLog>} 请求结果
-   */
-  public async createLog(params: model.LogModel): Promise<model.ResultType<schema.XLog>> {
+  /** 激活存储 */
+  public async activateStorage(
+    params: model.GainModel,
+  ): Promise<model.ResultType<schema.XEntity>> {
     return await this.request({
-      module: 'core',
-      action: 'CreateLog',
+      module: 'target',
+      action: 'ActivateStorage',
       params: params,
     });
   }
   /**
-   * 查询日志记录
+   * 根据ID查询实体信息
    * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XLogArray>} 请求结果
+   * @returns {model.ResultType<schema.XEntity>} 请求结果
    */
-  public async queryLogs(
+  public async queryEntityById(
     params: model.IdModel,
-  ): Promise<model.ResultType<schema.XLogArray>> {
+  ): Promise<model.ResultType<schema.XEntity>> {
     return await this.request({
       module: 'core',
-      action: 'QueryLogs',
+      action: 'QueryEntityById',
       params: params,
     });
   }
@@ -334,27 +285,13 @@ export default class KernelApi {
     });
   }
   /**
-   * 加入用户申请审批
-   * @param {model.ApprovalModel} params 请求参数
-   * @returns {model.ResultType<schema.XRelation>} 请求结果
-   */
-  public async joinTeamApproval(
-    params: model.ApprovalModel,
-  ): Promise<model.ResultType<schema.XRelation>> {
-    return await this.request({
-      module: 'target',
-      action: 'JoinTeamApproval',
-      params: params,
-    });
-  }
-  /**
    * 拉入用户的团队
    * @param {model.GiveModel} params 请求参数
    * @returns {model.ResultType<boolean>} 请求结果
    */
   public async pullAnyToTeam(
     params: model.GiveModel,
-  ): Promise<model.ResultType<boolean>> {
+  ): Promise<model.ResultType<string[]>> {
     return await this.request({
       module: 'target',
       action: 'PullAnyToTeam',
@@ -378,11 +315,11 @@ export default class KernelApi {
   /**
    * 根据ID查询用户信息
    * @param {model.IdArrayModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async queryTargetById(
     params: model.IdArrayModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QueryTargetById',
@@ -390,27 +327,13 @@ export default class KernelApi {
     });
   }
   /**
-   * 根据ID查询关系
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XRelation>} 请求结果
-   */
-  public async queryRelationById(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XRelation>> {
-    return await this.request({
-      module: 'target',
-      action: 'QueryRelationById',
-      params: params,
-    });
-  }
-  /**
    * 模糊查找用户
    * @param {model.SearchModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async searchTargets(
     params: model.SearchModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'SearchTargets',
@@ -420,11 +343,11 @@ export default class KernelApi {
   /**
    * 根据ID查询子用户
    * @param {model.GetSubsModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async querySubTargetById(
     params: model.GetSubsModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QuerySubTargetById',
@@ -434,11 +357,11 @@ export default class KernelApi {
   /**
    * 查询用户加入的用户
    * @param {model.GetJoinedModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async queryJoinedTargetById(
     params: model.GetJoinedModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QueryJoinedTargetById',
@@ -447,11 +370,11 @@ export default class KernelApi {
   }
   /**
    * 查询组织权限树
-   * @param {model.IdModel} params 请求参数
+   * @param {model.IdPageModel} params 请求参数
    * @returns {model.ResultType<schema.XAuthority>} 请求结果
    */
   public async queryAuthorityTree(
-    params: model.IdModel,
+    params: model.IdPageModel,
   ): Promise<model.ResultType<schema.XAuthority>> {
     return await this.request({
       module: 'target',
@@ -462,11 +385,11 @@ export default class KernelApi {
   /**
    * 查询拥有权限的成员
    * @param {model.GainModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async queryAuthorityTargets(
     params: model.GainModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QueryAuthorityTargets',
@@ -475,12 +398,12 @@ export default class KernelApi {
   }
   /**
    * 查询组织身份
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XIdentityArray>} 请求结果
+   * @param {model.IdPageModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XIdentity>>} 请求结果
    */
   public async queryTargetIdentitys(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XIdentityArray>> {
+    params: model.IdPageModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XIdentity>>> {
     return await this.request({
       module: 'target',
       action: 'QueryTargetIdentitys',
@@ -489,12 +412,12 @@ export default class KernelApi {
   }
   /**
    * 查询赋予身份的用户
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @param {model.IdPageModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async queryIdentityTargets(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+    params: model.IdPageModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QueryIdentityTargets',
@@ -503,12 +426,12 @@ export default class KernelApi {
   }
   /**
    * 查询在当前空间拥有权限的组织
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XTargetArray>} 请求结果
+   * @param {model.IdPageModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XTarget>>} 请求结果
    */
   public async queryTargetsByAuthority(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XTargetArray>> {
+    params: model.IdPageModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XTarget>>> {
     return await this.request({
       module: 'target',
       action: 'QueryTargetsByAuthority',
@@ -517,9 +440,11 @@ export default class KernelApi {
   }
   /**
    * 查询赋予的身份
-   * @returns {model.ResultType<schema.XIdProofArray>} 请求结果
+   * @returns {model.ResultType<model.PageResult<schema.XIdProof>>} 请求结果
    */
-  public async queryGivedIdentitys(): Promise<model.ResultType<schema.XIdProofArray>> {
+  public async queryGivedIdentitys(): Promise<
+    model.ResultType<model.PageResult<schema.XIdProof>>
+  > {
     return await this.request({
       module: 'target',
       action: 'QueryGivedIdentitys',
@@ -528,561 +453,15 @@ export default class KernelApi {
   }
   /**
    * 查询组织身份集
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XIdentityArray>} 请求结果
+   * @param {model.IdPageModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XIdentity>>} 请求结果
    */
   public async queryTeamIdentitys(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XIdentityArray>> {
+    params: model.IdPageModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XIdentity>>> {
     return await this.request({
       module: 'target',
       action: 'QueryTeamIdentitys',
-      params: params,
-    });
-  }
-  /**
-   * 创建即时消息
-   * @param {model.MsgSendModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async createImMsg(
-    params: model.MsgSendModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'chat',
-      action: 'CreateImMsg',
-      params: params,
-    });
-  }
-  /**
-   * 创建组织变更消息
-   * @param {model.TargetMsgModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async createTargetMsg(
-    params: model.TargetMsgModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'chat',
-      action: 'CreateTargetMsg',
-      params: params,
-    });
-  }
-  /**
-   * 创建身份变更消息
-   * @param {model.IdentityMsgModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async createIdentityMsg(
-    params: model.IdentityMsgModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'chat',
-      action: 'CreateIdentityMsg',
-      params: params,
-    });
-  }
-  /**
-   * 消息撤回
-   * @param {model.MsgSaveModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async recallImMsg(
-    params: model.MsgSaveModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'chat',
-      action: 'RecallImMsg',
-      params: params,
-    });
-  }
-  /**
-   * 标记消息
-   * @param {model.MsgTagModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async tagImMsg(params: model.MsgTagModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'chat',
-      action: 'TagImMsg',
-      params: params,
-    });
-  }
-  /**
-   * 创建元属性
-   * @param {model.PropertyModel} params 请求参数
-   * @returns {model.ResultType<schema.XProperty>} 请求结果
-   */
-  public async createProperty(
-    params: model.PropertyModel,
-  ): Promise<model.ResultType<schema.XProperty>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateProperty',
-      params: params,
-    });
-  }
-  /**
-   * 创建字典类型
-   * @param {model.DictModel} params 请求参数
-   * @returns {model.ResultType<schema.XDict>} 请求结果
-   */
-  public async createDict(
-    params: model.DictModel,
-  ): Promise<model.ResultType<schema.XDict>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateDict',
-      params: params,
-    });
-  }
-  /**
-   * 创建字典项
-   * @param {model.DictItemModel} params 请求参数
-   * @returns {model.ResultType<schema.XDictItem>} 请求结果
-   */
-  public async createDictItem(
-    params: model.DictItemModel,
-  ): Promise<model.ResultType<schema.XDictItem>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateDictItem',
-      params: params,
-    });
-  }
-  /**
-   * 创建分类
-   * @param {model.SpeciesModel} params 请求参数
-   * @returns {model.ResultType<schema.XSpecies>} 请求结果
-   */
-  public async createSpecies(
-    params: model.SpeciesModel,
-  ): Promise<model.ResultType<schema.XSpecies>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateSpecies',
-      params: params,
-    });
-  }
-  /**
-   * 创建特性
-   * @param {model.AttributeModel} params 请求参数
-   * @returns {model.ResultType<schema.XAttribute>} 请求结果
-   */
-  public async createAttribute(
-    params: model.AttributeModel,
-  ): Promise<model.ResultType<schema.XAttribute>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateAttribute',
-      params: params,
-    });
-  }
-  /**
-   * 创建表单
-   * @param {model.FormModel} params 请求参数
-   * @returns {model.ResultType<schema.XForm>} 请求结果
-   */
-  public async createForm(
-    params: model.FormModel,
-  ): Promise<model.ResultType<schema.XForm>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateForm',
-      params: params,
-    });
-  }
-  /**
-   * 创建物
-   * @param {model.ThingModel} params 请求参数
-   * @returns {model.ResultType<schema.XThing>} 请求结果
-   */
-  public async createThing(
-    params: model.ThingModel,
-  ): Promise<model.ResultType<schema.XThing>> {
-    return await this.request({
-      module: 'thing',
-      action: 'CreateThing',
-      params: params,
-    });
-  }
-  /**
-   * 删除元属性
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteProperty(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteProperty',
-      params: params,
-    });
-  }
-  /**
-   * 删除字典类型
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteDict(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteDict',
-      params: params,
-    });
-  }
-  /**
-   * 删除字典项
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteDictItem(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteDictItem',
-      params: params,
-    });
-  }
-  /**
-   * 删除分类
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteSpecies(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteSpecies',
-      params: params,
-    });
-  }
-  /**
-   * 删除度量标准
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteAttribute(
-    params: model.IdModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteAttribute',
-      params: params,
-    });
-  }
-  /**
-   * 删除表单
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteForm(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteForm',
-      params: params,
-    });
-  }
-  /**
-   * 删除物
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async deleteThing(params: model.IdModel): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'DeleteThing',
-      params: params,
-    });
-  }
-  /**
-   * 更新元属性
-   * @param {model.PropertyModel} params 请求参数
-   * @returns {model.ResultType<schema.XProperty>} 请求结果
-   */
-  public async updateProperty(
-    params: model.PropertyModel,
-  ): Promise<model.ResultType<schema.XProperty>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateProperty',
-      params: params,
-    });
-  }
-  /**
-   * 更新字典类型
-   * @param {model.DictModel} params 请求参数
-   * @returns {model.ResultType<schema.XDict>} 请求结果
-   */
-  public async updateDict(
-    params: model.DictModel,
-  ): Promise<model.ResultType<schema.XDict>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateDict',
-      params: params,
-    });
-  }
-  /**
-   * 更新字典项
-   * @param {model.DictItemModel} params 请求参数
-   * @returns {model.ResultType<schema.XDictItem>} 请求结果
-   */
-  public async updateDictItem(
-    params: model.DictItemModel,
-  ): Promise<model.ResultType<schema.XDictItem>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateDictItem',
-      params: params,
-    });
-  }
-  /**
-   * 更新分类
-   * @param {model.SpeciesModel} params 请求参数
-   * @returns {model.ResultType<schema.XSpecies>} 请求结果
-   */
-  public async updateSpecies(
-    params: model.SpeciesModel,
-  ): Promise<model.ResultType<schema.XSpecies>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateSpecies',
-      params: params,
-    });
-  }
-  /**
-   * 更新度量标准
-   * @param {model.AttributeModel} params 请求参数
-   * @returns {model.ResultType<schema.XAttribute>} 请求结果
-   */
-  public async updateAttribute(
-    params: model.AttributeModel,
-  ): Promise<model.ResultType<schema.XAttribute>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateAttribute',
-      params: params,
-    });
-  }
-  /**
-   * 更新表单
-   * @param {model.FormModel} params 请求参数
-   * @returns {model.ResultType<schema.XForm>} 请求结果
-   */
-  public async updateForm(
-    params: model.FormModel,
-  ): Promise<model.ResultType<schema.XForm>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateForm',
-      params: params,
-    });
-  }
-  /**
-   * 更新物
-   * @param {model.ThingModel} params 请求参数
-   * @returns {model.ResultType<schema.XThing>} 请求结果
-   */
-  public async updateThing(
-    params: model.ThingModel,
-  ): Promise<model.ResultType<schema.XThing>> {
-    return await this.request({
-      module: 'thing',
-      action: 'UpdateThing',
-      params: params,
-    });
-  }
-  /**
-   * 完善物的属性数据
-   * @param {model.SetPropModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async thingSetProperty(
-    params: model.SetPropModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'thing',
-      action: 'ThingSetProperty',
-      params: params,
-    });
-  }
-  /**
-   * 查询用户属性集
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XPropertyArray>} 请求结果
-   */
-  public async queryPropertys(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XPropertyArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryPropertys',
-      params: params,
-    });
-  }
-  /**
-   * 查询属性关联的特性
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XAttributeArray>} 请求结果
-   */
-  public async queryPropAttributes(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XAttributeArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryPropAttributes',
-      params: params,
-    });
-  }
-  /**
-   * 查询用户字典集
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XDictArray>} 请求结果
-   */
-  public async queryDicts(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XDictArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryDicts',
-      params: params,
-    });
-  }
-  /**
-   * 查询字典项集
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XDictItemArray>} 请求结果
-   */
-  public async queryDictItems(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XDictItemArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryDictItems',
-      params: params,
-    });
-  }
-  /**
-   * 查询用户分类树
-   * @param {model.GetSpeciesModel} params 请求参数
-   * @returns {model.ResultType<schema.XSpeciesArray>} 请求结果
-   */
-  public async querySpeciesTree(
-    params: model.GetSpeciesModel,
-  ): Promise<model.ResultType<schema.XSpeciesArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QuerySpeciesTree',
-      params: params,
-    });
-  }
-  /**
-   * 查询分类的度量标准
-   * @param {model.GetSpeciesResourceModel} params 请求参数
-   * @returns {model.ResultType<schema.XAttributeArray>} 请求结果
-   */
-  public async queryFormAttributes(
-    params: model.GainModel,
-  ): Promise<model.ResultType<schema.XAttributeArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryFormAttributes',
-      params: params,
-    });
-  }
-  /**
-   * 查询分类的表单
-   * @param {model.GetSpeciesResourceModel} params 请求参数
-   * @returns {model.ResultType<schema.XAttributeArray>} 请求结果
-   */
-  public async querySpeciesForms(
-    params: model.GetSpeciesResourceModel,
-  ): Promise<model.ResultType<schema.XFormArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QuerySpeciesForms',
-      params: params,
-    });
-  }
-  /**
-   * 物的属性值查询
-   * @param {model.GiveModel} params 请求参数
-   * @returns {model.ResultType<schema.XThingPropArray>} 请求结果
-   */
-  public async queryThingProperty(
-    params: model.GiveModel,
-  ): Promise<model.ResultType<schema.XThingPropArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryThingProperty',
-      params: params,
-    });
-  }
-  /**
-   * 物的属性历史值查询
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XThingPropHistroyArray>} 请求结果
-   */
-  public async queryPropertyHistroy(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XThingPropHistroyArray>> {
-    return await this.request({
-      module: 'thing',
-      action: 'QueryPropertyHistroy',
-      params: params,
-    });
-  }
-  /**
-   * 创建订单:商品直接购买
-   * @param {model.OrderModel} params 请求参数
-   * @returns {model.ResultType<schema.XOrder>} 请求结果
-   */
-  public async createOrder(
-    params: model.OrderModel,
-  ): Promise<model.ResultType<schema.XOrder>> {
-    return await this.request({
-      module: 'order',
-      action: 'CreateOrder',
-      params: params,
-    });
-  }
-  /**
-   * 创建订单支付
-   * @param {model.OrderPayModel} params 请求参数
-   * @returns {model.ResultType<schema.XOrderPay>} 请求结果
-   */
-  public async createOrderPay(
-    params: model.OrderPayModel,
-  ): Promise<model.ResultType<schema.XOrderPay>> {
-    return await this.request({
-      module: 'order',
-      action: 'CreateOrderPay',
-      params: params,
-    });
-  }
-  /**
-   * 查询订单集合
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XOrderArray>} 请求结果
-   */
-  public async queryOrders(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XOrderArray>> {
-    return await this.request({
-      module: 'order',
-      action: 'QueryOrders',
-      params: params,
-    });
-  }
-  /**
-   * 取消订单
-   * @param {model.ApprovalModel} params 请求参数
-   * @returns {model.ResultType<boolean>} 请求结果
-   */
-  public async cancelOrder(
-    params: model.ApprovalModel,
-  ): Promise<model.ResultType<boolean>> {
-    return await this.request({
-      module: 'order',
-      action: 'CancelOrder',
       params: params,
     });
   }
@@ -1115,6 +494,20 @@ export default class KernelApi {
     });
   }
   /**
+   * 创建节点网关信息
+   * @param {model.WorkGatewayModel} params 请求参数
+   * @returns {model.ResultType<schema.XWorkGateway>} 请求结果
+   */
+  public async createWorkGeteway(
+    params: model.WorkGatewayModel,
+  ): Promise<model.ResultType<schema.XWorkGateway>> {
+    return await this.request({
+      module: 'work',
+      action: 'CreateWorkGeteway',
+      params: params,
+    });
+  }
+  /**
    * 删除办事定义
    * @param {model.IdModel} params 请求参数
    * @returns {model.ResultType<boolean>} 请求结果
@@ -1125,6 +518,20 @@ export default class KernelApi {
     return await this.request({
       module: 'work',
       action: 'DeleteWorkDefine',
+      params: params,
+    });
+  }
+  /**
+   * 删除节点网关
+   * @param {model.IdModel} params 请求参数
+   * @returns {model.ResultType<boolean>} 请求结果
+   */
+  public async deleteWorkGateway(
+    params: model.IdModel,
+  ): Promise<model.ResultType<boolean>> {
+    return await this.request({
+      module: 'work',
+      action: 'DeleteWorkGateway',
       params: params,
     });
   }
@@ -1144,12 +551,12 @@ export default class KernelApi {
   }
   /**
    * 查询办事定义
-   * @param {model.GetSpeciesResourceModel} params 请求参数
-   * @returns {model.ResultType<schema.XWorkDefineArray>} 请求结果
+   * @param {model.IdPageModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XWorkDefine>>} 请求结果
    */
   public async queryWorkDefine(
-    params: model.GetSpeciesResourceModel,
-  ): Promise<model.ResultType<schema.XWorkDefineArray>> {
+    params: model.IdPageModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XWorkDefine>>> {
     return await this.request({
       module: 'work',
       action: 'QueryWorkDefine',
@@ -1157,9 +564,23 @@ export default class KernelApi {
     });
   }
   /**
+   * 查询办事网关节点信息
+   * @param {model.GetWorkGatewaysModel} params 请求参数
+   * @returns {model.ResultType<model.PageResult<schema.XWorkGateway>>} 请求结果
+   */
+  public async queryWorkGateways(
+    params: model.GetWorkGatewaysModel,
+  ): Promise<model.ResultType<model.PageResult<schema.XWorkGateway>>> {
+    return await this.request({
+      module: 'work',
+      action: 'QueryWorkGateways',
+      params: params,
+    });
+  }
+  /**
    * 查询办事节点
    * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.WorkNodeModel>} 请求结果
+   * @returns {model.ResultType<model.WorkNodeModel>} 请求结果
    */
   public async queryWorkNodes(
     params: model.IdModel,
@@ -1185,20 +606,6 @@ export default class KernelApi {
     });
   }
   /**
-   * 查询审批记录
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XWorkRecordArray>} 请求结果
-   */
-  public async queryWorkRecord(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XWorkRecordArray>> {
-    return await this.request({
-      module: 'work',
-      action: 'QueryWorkRecord',
-      params: params,
-    });
-  }
-  /**
    * 办事节点审批
    * @param {model.ApprovalTaskReq} params 请求参数
    * @returns {model.ResultType<boolean>} 请求结果
@@ -1213,54 +620,419 @@ export default class KernelApi {
     });
   }
   /**
-   * 查询办事实例
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XWorkInstance>} 请求结果
+   * 根据ID查询流程实例
+   * @param  过滤参数
+   * @returns {schema.XWorkInstance | undefined} 流程实例对象
    */
-  public async queryWorkInstanceById(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XWorkInstance>> {
-    return await this.request({
-      module: 'work',
-      action: 'QueryWorkInstanceById',
-      params: params,
+  public async findInstance(
+    belongId: string,
+    instanceId: string,
+  ): Promise<schema.XWorkInstance | undefined> {
+    const res = await this.dataProxy({
+      module: 'Collection',
+      action: 'Load',
+      belongId,
+      params: {
+        options: {
+          match: {
+            id: instanceId,
+          },
+          limit: 1,
+          lookup: {
+            from: 'work-task',
+            localField: 'id',
+            foreignField: 'instanceId',
+            as: 'tasks',
+          },
+        },
+        collName: 'work-instance',
+      },
+      relations: [],
+      flag: '-work-instance-',
+    });
+    if (res.success && res.data && res.data.data) {
+      if (Array.isArray(res.data.data) && res.data.data.length > 0) {
+        return res.data.data[0];
+      }
+    }
+  }
+  /**
+   * 获取对象数据
+   * @param {string} belongId 对象所在的归属用户ID
+   * @param {string} key 对象名称（eg: rootName.person.name）
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async diskInfo(
+    belongId: string,
+    relations: string[],
+  ): Promise<model.ResultType<model.DiskInfoType>> {
+    return await this.dataProxy({
+      module: 'Disk',
+      action: 'Info',
+      belongId,
+      relations,
+      params: {},
+      flag: 'diskInfo',
     });
   }
   /**
-   * 查询发起的办事
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<model.PageResult<schema.XWorkTask>>} 请求结果
+   * 获取对象数据
+   * @param {string} belongId 对象所在的归属用户ID
+   * @param {string} key 对象名称（eg: rootName.person.name）
+   * @returns {model.ResultType<T>} 对象异步结果
    */
-  public async queryMyApply(
-    params: model.IdModel,
-  ): Promise<model.ResultType<model.PageResult<schema.XWorkTask>>> {
-    return await this.request({
-      module: 'work',
-      action: 'QueryMyApply',
-      params: params,
+  public async objectGet<T>(
+    belongId: string,
+    relations: string[],
+    key: string,
+  ): Promise<model.ResultType<T>> {
+    return await this.dataProxy({
+      module: 'Object',
+      action: 'Get',
+      flag: key,
+      belongId,
+      relations,
+      params: key,
     });
   }
   /**
-   * 查询发起的办事
-   * @param {model.IdModel} params 请求参数
-   * @returns {model.ResultType<schema.XWorkInstanceArray>} 请求结果
+   * 变更对象数据
+   * @param {string} belongId 对象所在的归属用户ID
+   * @param {string} key 对象名称（eg: rootName.person.name）
+   * @param {any} setData 对象新的值
+   * @returns {model.ResultType<T>} 对象异步结果
    */
-  public async queryMyWorkInstance(
-    params: model.IdModel,
-  ): Promise<model.ResultType<schema.XWorkInstanceArray>> {
-    return await this.request({
-      module: 'work',
-      action: 'QueryMyWorkInstance',
-      params: params,
+  public async objectSet(
+    belongId: string,
+    relations: string[],
+    key: string,
+    setData: any,
+  ): Promise<model.ResultType<any>> {
+    return await this.dataProxy({
+      module: 'Object',
+      action: 'Set',
+      flag: key,
+      belongId,
+      relations,
+      params: {
+        key,
+        setData,
+      },
     });
   }
   /**
-   * 请求一个内核方法
-   * @param {ForwardType} reqs 请求体
+   * 删除对象数据
+   * @param {string} belongId 对象所在的归属用户ID
+   * @param {string} key 对象名称（eg: rootName.person.name）
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async objectDelete(
+    belongId: string,
+    relations: string[],
+    key: string,
+  ): Promise<model.ResultType<any>> {
+    return await this.dataProxy({
+      module: 'Object',
+      action: 'Delete',
+      flag: key,
+      belongId,
+      relations,
+      params: key,
+    });
+  }
+  /**
+   * 添加数据到数据集
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {} data 要添加的数据，对象/数组
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionInsert<T>(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    data: T,
+    copyId?: string,
+  ): Promise<model.ResultType<T>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'Insert',
+      belongId,
+      copyId,
+      relations,
+      flag: collName,
+      params: { collName, data },
+    });
+  }
+  /**
+   * 变更数据集数据
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {} data 要添加的数据，对象/数组
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionSetFields<T>(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    collSet: any,
+    copyId?: string,
+  ): Promise<model.ResultType<T>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'SetFields',
+      belongId,
+      copyId,
+      relations,
+      flag: collName,
+      params: { collName, collSet },
+    });
+  }
+  /**
+   * 替换数据集数据
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {T} replace 要添加的数据，对象/数组
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionReplace<T>(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    replace: T,
+    copyId?: string,
+  ): Promise<model.ResultType<T>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'Replace',
+      belongId,
+      copyId,
+      relations,
+      flag: collName,
+      params: { collName, replace },
+    });
+  }
+  /**
+   * 更新数据到数据集
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {any} update 更新操作（match匹配，update变更,options参数）
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionUpdate(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    update: any,
+    copyId?: string,
+  ): Promise<model.ResultType<any>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'Update',
+      belongId,
+      copyId,
+      relations,
+      flag: collName,
+      params: { collName, update },
+    });
+  }
+  /**
+   * 从数据集移除数据
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {any} match 匹配信息
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionRemove(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    match: any,
+    copyId?: string,
+  ): Promise<model.ResultType<any>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'Remove',
+      belongId,
+      copyId,
+      relations,
+      flag: collName,
+      params: { collName, match },
+    });
+  }
+  /**
+   * 查询数据集数据
+   * @param  过滤参数
+   * @returns {model.ResultType<T>} 移除异步结果
+   */
+  public async collectionLoad<T>(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    options: any,
+  ): Promise<model.LoadResult<T>> {
+    options.belongId = belongId;
+    const res = await this.dataProxy({
+      module: 'Collection',
+      action: 'Load',
+      belongId,
+      params: {
+        ...options,
+        collName: collName,
+      },
+      relations,
+      flag: `-${collName}`,
+    });
+    return { ...res, ...res.data };
+  }
+  /**
+   * 从数据集查询数据
+   * @param {string} collName 数据集名称（eg: history-message）
+   * @param {any} options 聚合管道(eg: {match:{a:1},skip:10,limit:10})
+   * @param {string} belongId 对象所在的归属用户ID
+   * @returns {model.ResultType<T>} 对象异步结果
+   */
+  public async collectionAggregate(
+    belongId: string,
+    relations: string[],
+    collName: string,
+    options: any,
+  ): Promise<model.ResultType<any>> {
+    return await this.dataProxy({
+      module: 'Collection',
+      action: 'Aggregate',
+      flag: collName,
+      belongId,
+      relations,
+      params: { collName, options },
+    });
+  }
+  /**
+   * 桶操作
+   * @param data 操作携带的数据
+   * @returns {ResultType<T>} 移除异步结果
+   */
+  public async bucketOpreate<T>(
+    belongId: string,
+    relations: string[],
+    data: model.BucketOpreateModel,
+  ): Promise<model.ResultType<T>> {
+    return await this.dataProxy({
+      module: 'Bucket',
+      action: 'Operate',
+      belongId,
+      relations,
+      flag: 'bucketOpreate',
+      params: data,
+    });
+  }
+  /**
+   * 加载物
+   * @param  过滤参数
+   * @returns {model.LoadResult<T>} 移除异步结果
+   */
+  public async loadThing(
+    belongId: string,
+    relations: string[],
+    options: any,
+  ): Promise<model.LoadResult<schema.XThing[]>> {
+    options.belongId = belongId;
+    const res = await this.dataProxy({
+      module: 'Thing',
+      action: 'Load',
+      belongId,
+      relations,
+      flag: 'loadThing',
+      params: options,
+    });
+    const result: model.LoadResult<any> = { ...res, ...res.data };
+    if (!Array.isArray(result.data)) {
+      result.data = [];
+    }
+    return result;
+  }
+  /**
+   * 创建物
+   * @param name 物的名称
+   * @returns {model.ResultType<schema.XThing>} 移除异步结果
+   */
+  public async createThing(
+    belongId: string,
+    relations: string[],
+    name: string,
+  ): Promise<model.ResultType<schema.XThing>> {
+    return await this.dataProxy({
+      module: 'Thing',
+      action: 'Create',
+      flag: 'createThing',
+      belongId,
+      relations,
+      params: name,
+    });
+  }
+  /**
+   * 请求一个内核授权方法
+   * @param {ReqestType} reqs 请求体
    * @returns 异步结果
    */
-  public async forward<T>(req: model.ForwardType): Promise<model.ResultType<T>> {
-    return await this._restRequest('forward', req, 20);
+  public async auth<T>(action: string, params: any): Promise<model.ResultType<T>> {
+    const res = await this._storeHub.invoke('Auth', {
+      module: 'auth',
+      action: action,
+      params: params,
+    });
+    if (
+      res.success &&
+      res.data &&
+      typeof res.data === 'object' &&
+      'accessToken' in res.data
+    ) {
+      this.accessToken = res.data.accessToken;
+      await this.tokenAuth();
+    }
+    return res;
+  }
+  /**
+   * 根据token获取用户信息
+   */
+  public async tokenAuth(): Promise<boolean> {
+    if (this.accessToken?.length > 0) {
+      const res = await this._storeHub.invoke('TokenAuth', this.accessToken);
+      if (res.success) {
+        this.user = res.data;
+        return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * 由内核代理一个http请求
+   * @param {model.HttpRequestType} reqs 请求体
+   * @returns 异步结果
+   */
+  public async httpForward(
+    req: model.HttpRequestType,
+  ): Promise<model.ResultType<model.HttpResponseType>> {
+    return await this._storeHub.invoke('HttpForward', req);
+  }
+  /**
+   * 请求一个数据核方法
+   * @param {ReqestType} reqs 请求体
+   * @returns 异步结果
+   */
+  public async dataProxy(req: model.DataProxyType): Promise<model.ResultType<any>> {
+    return await this._storeHub.invoke('DataProxy', req);
+  }
+  /**
+   * 数据变更通知
+   * @param {ReqestType} reqs 请求体
+   * @returns 异步结果
+   */
+  public async dataNotify(req: model.DataNotityType): Promise<model.ResultType<boolean>> {
+    if (req.ignoreSelf && this._storeHub.isConnected && this._connectionId.length > 0) {
+      req.ignoreConnectionId = this._connectionId;
+    }
+    return await this._storeHub.invoke('DataNotify', req);
   }
   /**
    * 请求一个内核方法
@@ -1268,11 +1040,7 @@ export default class KernelApi {
    * @returns 异步结果
    */
   public async request(req: model.ReqestType): Promise<model.ResultType<any>> {
-    if (this._storeHub.isConnected) {
-      return await this._storeHub.invoke('Request', req);
-    } else {
-      return await this._restRequest('request', req);
-    }
+    return await this._storeHub.invoke('Request', req);
   }
   /**
    * 请求多个内核方法,使用同一个事务
@@ -1280,11 +1048,48 @@ export default class KernelApi {
    * @returns 异步结果
    */
   public async requests(reqs: model.ReqestType[]): Promise<model.ResultType<any>> {
-    if (this._storeHub.isConnected) {
-      return await this._storeHub.invoke('Requests', reqs);
-    } else {
-      return await this._restRequest('requests', reqs);
+    return await this._storeHub.invoke('Requests', reqs);
+  }
+  /**
+   * 订阅变更
+   * @param flag 标识
+   * @param keys 唯一标志
+   * @param operation 操作
+   */
+  public subscribe(
+    flag: string,
+    keys: string[],
+    operation: (...args: any[]) => any,
+  ): void {
+    if (!flag || !operation || keys.length < 1) {
+      return;
     }
+    flag = flag.toLowerCase();
+    if (!this._subMethods[flag]) {
+      this._subMethods[flag] = [];
+    }
+    this._subMethods[flag].push({
+      keys,
+      operation,
+    });
+    const data = this._cacheData[flag] || [];
+    data.forEach((item: any) => {
+      operation.apply(this, [item]);
+    });
+    this._cacheData[flag] = [];
+  }
+  /**
+   * 取消订阅变更
+   * @param flag 标识
+   * @param keys 唯一标志
+   * @param operation 操作
+   */
+  public unSubscribe(key: string): void {
+    Object.keys(this._subMethods).forEach((flag) => {
+      this._subMethods[flag] = this._subMethods[flag].filter(
+        (i) => !i.keys.includes(key),
+      );
+    });
   }
   /**
    * 监听服务端方法
@@ -1295,49 +1100,52 @@ export default class KernelApi {
     if (!methodName || !newOperation) {
       return;
     }
-
     methodName = methodName.toLowerCase();
     if (!this._methods[methodName]) {
       this._methods[methodName] = [];
     }
-
     if (this._methods[methodName].indexOf(newOperation) !== -1) {
       return;
     }
-
     this._methods[methodName].push(newOperation);
   }
-  /**
-   * 使用rest请求后端
-   * @param methodName 方法
-   * @param data 参数
-   * @returns 返回结果
-   */
-  private async _restRequest(
-    methodName: string,
-    args: any,
-    timeout: number = 2,
-  ): Promise<model.ResultType<any>> {
-    const res = await this._axiosInstance({
-      method: 'post',
-      timeout: timeout * 1000,
-      url: '/orginone/kernel/rest/' + methodName,
-      headers: {
-        Authorization: this._anystore.accessToken,
-      },
-      data: args,
-    });
-    if (res.data && (res.data as model.ResultType<any>)) {
-      const result = res.data as model.ResultType<any>;
-      if (!result.success) {
-        if (result.code === 401) {
-          logger.unauth();
-        } else {
-          logger.warn('操作失败,' + result.msg);
+  /** 接收服务端消息 */
+  private _receive(res: model.ReceiveType) {
+    switch (res.target) {
+      case 'DataNotify':
+        {
+          const data: model.DataNotityType = res.data;
+          if (data.ignoreConnectionId === this._connectionId) {
+            return;
+          }
+          const flag = `${data.belongId}-${data.targetId}-${data.flag}`.toLowerCase();
+          const methods = this._subMethods[flag];
+          if (methods) {
+            try {
+              methods.forEach((m) => m.operation.apply(this, [data.data]));
+            } catch (e) {
+              logger.error(e as Error);
+            }
+          } else if (!data.onlineOnly) {
+            const _cache = this._cacheData[flag] || [];
+            this._cacheData[flag] = [..._cache, data.data];
+          }
+        }
+        break;
+      case 'QrAuth':
+        this.accessToken = res.data;
+        logger.qrauthed();
+        break;
+      default: {
+        const methods = this._methods[res.target.toLowerCase()];
+        if (methods) {
+          try {
+            methods.forEach((m) => m.apply(this, [res.data]));
+          } catch (e) {
+            logger.error(e as Error);
+          }
         }
       }
-      return result;
     }
-    return model.badRequest();
   }
 }

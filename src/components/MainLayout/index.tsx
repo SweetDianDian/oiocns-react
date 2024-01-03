@@ -1,19 +1,23 @@
-import { Col, Divider, Dropdown, Layout, Row, Space, Typography, Button } from 'antd';
-import React, { useState } from 'react';
-import cls from './index.module.less';
+import { Button, Col, Divider, Dropdown, Layout, Row, Space, Typography } from 'antd';
+import React from 'react';
 import CustomMenu from '@/components/CustomMenu';
 import CustomBreadcrumb from '@/components/CustomBreadcrumb';
-import { MenuItemType } from 'typings/globelType';
-import { ImArrowLeft2 } from 'react-icons/im';
-import { RiMenuFoldFill, RiMenuUnfoldFill, RiMore2Fill } from 'react-icons/ri';
-import OrgIcons from '@/bizcomponents/GlobalComps/orgIcons';
+import { MenuItemType, OperateMenuType } from 'typings/globelType';
+import { ImUndo2 } from 'react-icons/im';
+import { Resizable } from 'devextreme-react';
+import { LeftBarIcon, RightBarIcon } from '@/components/Common/GlobalComps/customIcon';
+import useStorage from '@/hooks/useStorage';
+import EntityPreview from './preview';
+import { RiMore2Fill } from 'react-icons/ri';
 const { Content, Sider } = Layout;
 
 /**
  * 内容区模板类
  */
 type MainLayoutType = {
-  className?: string; //wrap calss
+  previewFlag?: string;
+  leftShow?: boolean;
+  rightShow?: boolean;
   children?: React.ReactNode; // 子组件
   siderMenuData: MenuItemType;
   rightBar?: React.ReactNode;
@@ -29,24 +33,31 @@ type MainLayoutType = {
  * @returns
  */
 const MainLayout: React.FC<MainLayoutType> = (props) => {
-  const [collapsed, setCollapsed] = useState(false);
+  const [leftSider, setLeftSider] = useStorage<boolean>('leftSider', false);
+  const [rightSider, setRightSider] = useStorage<boolean>('rightSider', true);
+  const [mainWidth, setMainWidth] = useStorage<string | number>('mainWidth', '40%');
   const parentMenu = props.selectMenu.parentMenu ?? props.siderMenuData;
-  const outside =
-    props.selectMenu.menus?.filter((item) => item.model === 'outside') ?? [];
-  const inside = props.selectMenu.menus?.filter((item) => item.model != 'outside') ?? [];
-  const onOperateMenuClick = async (item: MenuItemType, key: string) => {
-    if (item.menus) {
-      const menu = item.menus.find((i) => i.key == key);
-      if (menu && menu.beforeLoad) {
-        if (await menu.beforeLoad()) {
-          onSelectClick(parentMenu);
-        } else {
-          onSelectClick(props.selectMenu);
-        }
+  const findMenus = (
+    key: string,
+    menus?: OperateMenuType[],
+  ): OperateMenuType | undefined => {
+    for (const menu of menus ?? []) {
+      if (menu.key === key) {
+        return menu;
       } else {
-        props.onMenuClick?.apply(this, [item, key]);
+        const find = findMenus(key, menu.children);
+        if (find) {
+          return find;
+        }
       }
     }
+  };
+  const onOperateMenuClick = async (item: MenuItemType, key: string) => {
+    const menu = findMenus(key, item.menus);
+    if (menu && menu.beforeLoad) {
+      await menu.beforeLoad();
+    }
+    props.onMenuClick?.apply(this, [item, key]);
   };
   const onSelectClick = async (item: MenuItemType) => {
     if (item.beforeLoad) {
@@ -54,90 +65,59 @@ const MainLayout: React.FC<MainLayoutType> = (props) => {
     }
     props.onSelect?.apply(this, [item]);
   };
+  const previewCtx = React.useMemo(() => {
+    return <EntityPreview flag={props.previewFlag} />;
+  }, [props]);
   return (
-    <Layout
-      className={`${props.className}`}
-      style={{ height: '100%', position: 'relative' }}>
-      <Sider className={cls.sider} width={250} collapsed={collapsed}>
-        <div
-          className={cls.title}
-          title={parentMenu.label}
-          onClick={() => {
-            onSelectClick(parentMenu);
-          }}>
-          {!collapsed && parentMenu.key != props.siderMenuData.key && (
-            <div className={cls.backup}>
-              <ImArrowLeft2 fontSize={20} />
-            </div>
-          )}
-          <span style={{ fontSize: 20, margin: '0 6px' }}>{parentMenu.icon}</span>
-          {!collapsed && <strong>{parentMenu.label}</strong>}
-        </div>
-        <div className={cls.container} id="templateMenu">
-          <CustomMenu
-            item={parentMenu}
-            collapsed={collapsed}
-            selectMenu={props.selectMenu}
+    <Layout className={'main_layout'}>
+      <Row className={'header'} justify="space-between">
+        <Col>
+          <CustomBreadcrumb
+            selectKey={props.selectMenu.key}
+            item={props.siderMenuData}
             onSelect={(item) => {
               onSelectClick(item);
-            }}
-            onMenuClick={onOperateMenuClick}
-          />
-        </div>
-        <div
-          className={cls.exit}
-          onClick={() => {
-            sessionStorage.clear();
-            location.reload();
-          }}>
-          <OrgIcons size={26} exit title="注销" selected />
-          {!collapsed && <span>注销</span>}
-        </div>
-      </Sider>
-      <Layout className={cls.container}>
-        <Row className={cls[`content-top`]} justify="space-between">
-          <Col>
-            <CustomBreadcrumb
-              leftBar={
-                <Typography.Link
-                  style={{ fontSize: 16 }}
-                  onClick={() => {
-                    setCollapsed(!collapsed);
-                  }}>
-                  {collapsed ? (
-                    <RiMenuUnfoldFill fontSize={22} />
-                  ) : (
-                    <RiMenuFoldFill fontSize={22} />
-                  )}
-                </Typography.Link>
-              }
-              selectKey={props.selectMenu.key}
-              item={props.siderMenuData}
-              onSelect={(item) => {
-                onSelectClick(item);
-              }}></CustomBreadcrumb>
-          </Col>
-          <Col className={cls.rightstyle}>
-            <Space wrap split={<Divider type="vertical" />} size={2}>
-              {props.rightBar}
-              {outside.length > 0 &&
-                outside.map((item) => {
-                  return (
-                    <Typography.Link
-                      key={item.key}
-                      title={item.label}
-                      style={{ fontSize: 18 }}
-                      onClick={() => {
-                        onOperateMenuClick(props.selectMenu, item.key);
-                      }}>
-                      {item.icon}
-                    </Typography.Link>
-                  );
-                })}
-              {inside.length > 0 && (
+            }}></CustomBreadcrumb>
+        </Col>
+        <Col>
+          <Space wrap split={<Divider type="vertical" />} size={2}>
+            {props.leftShow === undefined && (
+              <Typography.Link
+                title={'切换主测栏'}
+                style={{ fontSize: 18 }}
+                onClick={() => setLeftSider(!leftSider)}>
+                <LeftBarIcon size={18} width={4} selected={leftSider} />
+              </Typography.Link>
+            )}
+            {props.rightShow === undefined && (
+              <Typography.Link
+                title={'切换辅助侧栏'}
+                style={{ fontSize: 18 }}
+                onClick={() => setRightSider(!rightSider)}>
+                <RightBarIcon size={18} width={8} selected={rightSider} />
+              </Typography.Link>
+            )}
+            {props.rightBar}
+          </Space>
+        </Col>
+      </Row>
+      <Layout className={'body'}>
+        {(props.leftShow ?? leftSider) && (
+          <Sider className={'sider'} width={250}>
+            <div className={'title'}>
+              {parentMenu.key != props.siderMenuData.key && (
+                <span className={'backup'} onClick={() => onSelectClick(parentMenu)}>
+                  <ImUndo2 size={16} />
+                </span>
+              )}
+              <div className={'label'} onClick={() => onSelectClick(parentMenu)}>
+                <span style={{ marginRight: 6 }}>{parentMenu.icon}</span>
+                <Typography.Text ellipsis>{parentMenu.label}</Typography.Text>
+              </div>
+              {parentMenu.menus && parentMenu.menus.length > 0 && (
                 <Dropdown
                   menu={{
-                    items: inside,
+                    items: parentMenu.menus,
                     onClick: ({ key }) => {
                       onOperateMenuClick(props.selectMenu, key);
                     },
@@ -150,10 +130,35 @@ const MainLayout: React.FC<MainLayoutType> = (props) => {
                   <RiMore2Fill fontSize={22} style={{ cursor: 'pointer' }} />
                 </Dropdown>
               )}
-            </Space>
-          </Col>
-        </Row>
-        <Content className={cls.content}>{props.children}</Content>
+            </div>
+            <div className={'container'} id="templateMenu">
+              <CustomMenu
+                item={parentMenu}
+                collapsed={false}
+                selectMenu={props.selectMenu}
+                onSelect={(item) => {
+                  onSelectClick(item);
+                }}
+                onMenuClick={onOperateMenuClick}
+              />
+            </div>
+          </Sider>
+        )}
+        {props.rightShow !== false && (props.rightShow || rightSider) ? (
+          <>
+            <Resizable
+              handles={'right'}
+              width={mainWidth}
+              onResize={(e) => setMainWidth(e.width)}>
+              <Sider className={'content'} width={'100%'}>
+                {props.children}
+              </Sider>
+            </Resizable>
+            <Content className={'content'}>{previewCtx}</Content>
+          </>
+        ) : (
+          <Content className={'content'}>{props.children}</Content>
+        )}
       </Layout>
     </Layout>
   );

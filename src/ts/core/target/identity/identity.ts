@@ -1,6 +1,8 @@
 import { kernel, model, schema } from '../../../base';
-import { Entity, IEntity, OperateType, TargetType } from '../../public';
+import { Entity, IEntity, OperateType, entityOperates, fileOperates } from '../../public';
 import { PageAll } from '../../public/consts';
+import { IDirectory } from '../../thing/directory';
+import { IFile } from '../../thing/fileinfo';
 import { ITarget } from '../base/target';
 
 /** 身份（角色）接口 */
@@ -24,11 +26,23 @@ export interface IIdentity extends IEntity<schema.XIdentity> {
 /** 身份（角色）实现类 */
 export class Identity extends Entity<schema.XIdentity> implements IIdentity {
   constructor(_metadata: schema.XIdentity, current: ITarget) {
-    super({
-      ..._metadata,
-      typeName: '角色',
-    });
+    super(
+      {
+        ..._metadata,
+        typeName: '角色',
+      },
+      [],
+    );
     this.current = current;
+  }
+  async rename(name: string): Promise<boolean> {
+    return await this.update({ ...this.metadata, name: name });
+  }
+  copy(_destination: IDirectory): Promise<boolean> {
+    throw new Error('Method not implemented.');
+  }
+  move(_destination: IDirectory): Promise<boolean> {
+    throw new Error('Method not implemented.');
   }
   current: ITarget;
   members: schema.XTarget[] = [];
@@ -58,9 +72,12 @@ export class Identity extends Entity<schema.XIdentity> implements IIdentity {
           subIds: members.map((i) => i.id),
         });
         if (!res.success) return false;
-        members.forEach((a) => this.createIdentityMsg(OperateType.Add, a));
+        members.forEach((a) => this._sendIdentityChangeMsg(OperateType.Add, a));
       }
       this.members.push(...members);
+      if (members.find((a) => a.id === this.userId)) {
+        this.current.user.giveIdentity([this.metadata]);
+      }
     }
     return true;
   }
@@ -76,10 +93,10 @@ export class Identity extends Entity<schema.XIdentity> implements IIdentity {
           subIds: members.map((i) => i.id),
         });
         if (!res.success) return false;
-        members.forEach((a) => this.createIdentityMsg(OperateType.Remove, a));
+        members.forEach((a) => this._sendIdentityChangeMsg(OperateType.Remove, a));
       }
-      if (members.some((a) => a.id === this.current.space.user.id)) {
-        this.current.space.user.removeGivedIdentity([this.metadata.id]);
+      if (members.some((a) => a.id === this.userId)) {
+        this.current.user.removeGivedIdentity([this.id]);
       }
       this.members = this.members.filter((i) => members.every((s) => s.id !== i.id));
     }
@@ -96,40 +113,44 @@ export class Identity extends Entity<schema.XIdentity> implements IIdentity {
     if (res.success && res.data?.id) {
       res.data.typeName = '角色';
       this.setMetadata(res.data);
-      this.createIdentityMsg(OperateType.Update);
+      this._sendIdentityChangeMsg(OperateType.Update);
     }
     return res.success;
   }
   async delete(notity: boolean = false): Promise<boolean> {
     if (!notity) {
       if (this.current.hasRelationAuth()) {
-        this.createIdentityMsg(OperateType.Delete);
+        this._sendIdentityChangeMsg(OperateType.Delete);
       }
       const res = await kernel.deleteIdentity({
         id: this.id,
-        page: PageAll,
       });
       if (!res.success) return false;
     }
-    this.current.space.user.removeGivedIdentity([this.metadata.id]);
+    this.current.user.removeGivedIdentity([this.metadata.id]);
     this.current.identitys = this.current.identitys.filter((i) => i.key != this.key);
     return true;
   }
-  async createIdentityMsg(
+  override operates(): model.OperateModel[] {
+    const operates: model.OperateModel[] = [];
+    if (this.current.hasRelationAuth()) {
+      operates.push(entityOperates.Update, fileOperates.Rename);
+    }
+    operates.push(...super.operates());
+    return operates.sort((a, b) => (a.menus ? -10 : b.menus ? 10 : 0));
+  }
+  content(_mode?: number | undefined): IFile[] {
+    return [];
+  }
+  async _sendIdentityChangeMsg(
     operate: OperateType,
     subTarget?: schema.XTarget,
   ): Promise<void> {
-    await kernel.createIdentityMsg({
-      stationId: '0',
-      identityId: this.id,
-      excludeOperater: false,
-      group: this.current.typeName == TargetType.Group,
-      data: JSON.stringify({
-        operate,
-        subTarget,
-        identity: this.metadata,
-        operater: this.current.space.user.metadata,
-      }),
+    await this.current.sendIdentityChangeMsg({
+      operate,
+      subTarget,
+      identity: this.metadata,
+      operater: this.current.user.metadata,
     });
   }
 }

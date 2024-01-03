@@ -1,89 +1,61 @@
 import { schema, kernel, model } from '../../../base';
 import { PageAll } from '../../public/consts';
-import { SpeciesType, TargetType } from '../../public/enums';
+import { TargetType } from '../../public/enums';
 import { IAuthority, Authority } from '../authority/authority';
 import { Cohort, ICohort } from '../outTeam/cohort';
-import { IPerson } from '../person';
 import { ITarget, Target } from './target';
-import { IChatMessage, ChatMessage } from '../../chat/message/chatmsg';
-import { IMsgChat, PersonMsgChat } from '../../chat/message/msgchat';
-import { IDict } from '../../thing/dict/dict';
-import { IDictClass } from '../../thing/dict/dictclass';
-import { IFileSystem, FileSystem } from '../../thing/filesys/filesystem';
+import { ISession, Session } from '../../chat/session';
+import { targetOperates } from '../../public';
+import { IStorage } from '../outTeam/storage';
+import { IPerson } from '../person';
+import { IFile } from '../../thing/fileinfo';
 
 /** 自归属用户接口类 */
 export interface IBelong extends ITarget {
-  /** 当前用户 */
-  user: IPerson;
-  /** 归属的消息 */
-  message: IChatMessage;
   /** 超管权限，权限为树结构 */
   superAuth: IAuthority | undefined;
-  /** 元数据字典 */
-  dicts: IDict[];
   /** 加入/管理的群 */
   cohorts: ICohort[];
+  /** 存储资源群 */
+  storages: IStorage[];
   /** 上级用户 */
   parentTarget: ITarget[];
   /** 群会话 */
-  cohortChats: IMsgChat[];
+  cohortChats: ISession[];
   /** 共享组织 */
   shareTarget: ITarget[];
-  /** 文件系统 */
-  filesys: IFileSystem;
-  /** 加载字典 */
-  loadDicts(): Promise<IDict[]>;
-  /** 加载群 */
-  loadCohorts(reload?: boolean): Promise<ICohort[]>;
+  /** 获取存储占用情况 */
+  getDiskInfo(): Promise<model.DiskInfoType | undefined>;
   /** 加载超管权限 */
   loadSuperAuth(reload?: boolean): Promise<IAuthority | undefined>;
   /** 申请加用户 */
   applyJoin(members: schema.XTarget[]): Promise<boolean>;
   /** 设立人员群 */
   createCohort(data: model.TargetModel): Promise<ICohort | undefined>;
+  /** 发送职权变更消息 */
+  sendAuthorityChangeMsg(operate: string, authority: schema.XAuthority): Promise<boolean>;
 }
 
 /** 自归属用户基类实现 */
 export abstract class Belong extends Target implements IBelong {
   constructor(
     _metadata: schema.XTarget,
-    _labels: string[],
+    _relations: string[],
     _user?: IPerson,
     _memberTypes: TargetType[] = [TargetType.Person],
   ) {
-    super(_metadata, _labels, undefined, _memberTypes);
-    this.user = _user || (this as unknown as IPerson);
-    this.speciesTypes = [
-      SpeciesType.Dict,
-      SpeciesType.Store,
-      SpeciesType.Thing,
-      SpeciesType.Application,
-    ];
-    this.message = new ChatMessage(this);
-    this.filesys = new FileSystem(this);
+    super([], _metadata, _relations, undefined, _user, _memberTypes);
+    kernel.subscribe(
+      `${_metadata.belongId}-${_metadata.id}-authority`,
+      [this.key],
+      (data: any) => this.superAuth?.receiveAuthority(data),
+    );
   }
-  user: IPerson;
-  dicts: IDict[] = [];
-  filesys: IFileSystem;
   cohorts: ICohort[] = [];
-  message: IChatMessage;
+  storages: IStorage[] = [];
   superAuth: IAuthority | undefined;
-  async loadDicts(): Promise<IDict[]> {
-    const dicts: IDict[] = [];
-    for (const item of this.species) {
-      switch (item.typeName) {
-        case SpeciesType.Dict: {
-          const subDicts = await (item as IDictClass).loadAllDicts();
-          for (const item of subDicts) {
-            if (dicts.findIndex((i) => i.id === item.id) < 0) {
-              dicts.push(item);
-            }
-          }
-        }
-      }
-    }
-    this.dicts = dicts;
-    return dicts;
+  get superior(): IFile {
+    return 'disk' as unknown as IFile;
   }
   async loadSuperAuth(reload: boolean = false): Promise<IAuthority | undefined> {
     if (!this.superAuth || reload) {
@@ -97,12 +69,22 @@ export abstract class Belong extends Target implements IBelong {
     }
     return this.superAuth;
   }
+  async findEntityAsync(id: string): Promise<schema.XEntity | undefined> {
+    const metadata = this.findMetadata<schema.XEntity>(id);
+    if (metadata) {
+      return metadata;
+    }
+    const res = await kernel.queryEntityById({ id: id });
+    if (res.success && res.data?.id) {
+      this.updateMetadata(res.data);
+      return res.data;
+    }
+  }
   async createCohort(data: model.TargetModel): Promise<ICohort | undefined> {
     data.typeName = TargetType.Cohort;
     const metadata = await this.create(data);
     if (metadata) {
-      const cohort = new Cohort(metadata, this);
-      await cohort.deepLoad();
+      const cohort = new Cohort(metadata, this, metadata.belongId);
       if (this.typeName != TargetType.Person) {
         if (!(await this.pullSubTarget(cohort))) {
           return;
@@ -110,7 +92,14 @@ export abstract class Belong extends Target implements IBelong {
       }
       this.cohorts.push(cohort);
       await cohort.pullMembers([this.user.metadata]);
+      await cohort.deepLoad();
       return cohort;
+    }
+  }
+  async getDiskInfo(): Promise<model.DiskInfoType | undefined> {
+    const res = await kernel.diskInfo(this.id, this.relations);
+    if (res.success && res.data) {
+      return res.data;
     }
   }
   override loadMemberChats(_newMembers: schema.XTarget[], _isAdd: boolean): void {
@@ -119,18 +108,49 @@ export abstract class Belong extends Target implements IBelong {
       const labels = this.id === this.user.id ? ['好友'] : [this.name, '同事'];
       _newMembers.forEach((i) => {
         if (!this.memberChats.some((a) => a.id === i.id)) {
-          this.memberChats.push(new PersonMsgChat(i, labels, this));
+          this.memberChats.push(new Session(i.id, this, i, labels));
         }
       });
     } else {
       this.memberChats = this.memberChats.filter((i) =>
-        _newMembers.every((a) => a.id != i.chatId),
+        _newMembers.every((a) => a.id != i.sessionId),
       );
     }
   }
+  async loadContent(reload: boolean = false): Promise<boolean> {
+    await super.loadContent(reload);
+    await this.loadSuperAuth(reload);
+    return true;
+  }
+  override operates(): model.OperateModel[] {
+    const operates = super.operates();
+    if (this.hasRelationAuth()) {
+      operates.unshift(targetOperates.NewCohort);
+    }
+    return operates;
+  }
   abstract get shareTarget(): ITarget[];
-  abstract cohortChats: IMsgChat[];
+  abstract cohortChats: ISession[];
   abstract get parentTarget(): ITarget[];
   abstract applyJoin(members: schema.XTarget[]): Promise<boolean>;
-  abstract loadCohorts(reload?: boolean | undefined): Promise<ICohort[]>;
+  async sendAuthorityChangeMsg(
+    operate: string,
+    authority: schema.XAuthority,
+  ): Promise<boolean> {
+    const res = await kernel.dataNotify({
+      data: {
+        operate,
+        authority,
+        operater: this.user.metadata,
+      },
+      flag: 'authority',
+      onlineOnly: true,
+      belongId: this.metadata.belongId,
+      relations: this.relations,
+      onlyTarget: true,
+      ignoreSelf: true,
+      targetId: this.metadata.id,
+    });
+    return res.success;
+  }
 }
